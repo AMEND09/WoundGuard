@@ -281,12 +281,12 @@ const WoundTrackingApp = () => {
   };
 
   // Function to get color based on healing status
-  const getStatusColor = () => {
-    const status = getHealingStatus();
-    if (status === "Good") return "text-emerald-500";
-    if (status === "Moderate") return "text-amber-500";
-    return "text-rose-500";
-  };
+//  const getStatusColor = () => {
+//    const status = getHealingStatus();
+//    if (status === "Good") return "text-emerald-500";
+//    if (status === "Moderate") return "text-amber-500";
+//    return "text-rose-500";
+//  };
 
   // Function to get background color based on healing status
   const getStatusBgColor = () => {

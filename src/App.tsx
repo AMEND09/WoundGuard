@@ -1,4 +1,3 @@
-import React from 'react';
 import WoundTrackingApp from './artifacts/default';
 
 function App() {

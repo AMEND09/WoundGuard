@@ -18,5 +18,5 @@ export default defineConfig({
       'src': path.resolve(__dirname, './src'),
     },
   },
-  base: './' // This helps with relative paths for deployment
+  base: process.env.NODE_ENV === 'production' ? '/WoundTracker/' : '/',
 })

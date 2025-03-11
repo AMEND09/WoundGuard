@@ -280,13 +280,7 @@ const WoundTrackingApp = () => {
     return "Concerning";
   };
 
-  // Function to get color based on healing status
-//  const getStatusColor = () => {
-//    const status = getHealingStatus();
-//    if (status === "Good") return "text-emerald-500";
-//    if (status === "Moderate") return "text-amber-500";
-//    return "text-rose-500";
-//  };
+  // Remove the unused getStatusColor function that's causing the TS6133 error
 
   // Function to get background color based on healing status
   const getStatusBgColor = () => {

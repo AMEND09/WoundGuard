@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, BarChart, Bar } from 'recharts';
-import { Gauge, AlertCircle, Wifi, WifiOff, Droplet, ThermometerSun, Microscope, Activity } from 'lucide-react';
+import { Gauge, AlertCircle, Wifi, WifiOff, Droplet, ThermometerSun, Microscope, Activity, Camera, PencilRuler, FileDown, FileUp, ClipboardList, ClipboardEdit, Download } from 'lucide-react';
 
 // Define interfaces for the app
 interface HistoricalDataPoint {
@@ -12,6 +12,8 @@ interface HistoricalDataPoint {
   humidity: number;
   ph: number | string;
   lastUpdate?: string | null;
+  imageUrl?: string | null;
+  notes?: string;
 }
 
 interface SensorData {
@@ -28,14 +30,13 @@ interface TooltipProps {
   label?: string | number;
 }
 
-// Mock data to simulate Arduino serial data
-const mockHistoricalData: HistoricalDataPoint[] = Array(30).fill(null).map((_, i) => ({
-  day: i + 1,
-  area: Math.round(100 - 70 * Math.exp(-i / 15) + Math.random() * 5),
-  temperature: (36 + Math.random() * 2).toFixed(1),
-  humidity: Math.round(60 + Math.random() * 20),
-  ph: (7 + Math.sin(i / 5) * 0.5).toFixed(1)
-}));
+interface LogEntry {
+  timestamp: string;
+  type: string;
+  description: string;
+}
+
+// ...existing code...
 
 const WoundTrackingApp = () => {
   const [connected, setConnected] = useState(false);
@@ -52,10 +53,24 @@ const WoundTrackingApp = () => {
   const [isWebSerialSupported, setIsWebSerialSupported] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
   
-  // Refs for maintaining serial port connection
+  // State variables for manual area measurement
+  const [showAreaInput, setShowAreaInput] = useState(false);
+  const [manualAreaValue, setManualAreaValue] = useState<string>('');
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  
+  // New state variables for manual logging and data export/import
+  const [showManualLogDialog, setShowManualLogDialog] = useState(false);
+  const [manualLogEntries, setManualLogEntries] = useState<LogEntry[]>([]);
+  const [manualLogType, setManualLogType] = useState<string>('observation');
+  const [manualLogDescription, setManualLogDescription] = useState<string>('');
+  const [showExportDialog, setShowExportDialog] = useState(false);
+  
+  // Refs for maintaining serial port connection and file input
   const serialPortRef = useRef<any>(null);
   const readerRef = useRef<any>(null);
   const writerRef = useRef<any>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   // Check Web Serial API support on component mount
   useEffect(() => {
@@ -78,96 +93,6 @@ const WoundTrackingApp = () => {
     
     checkSerialSupport();
   }, []);
-
-  // Function to disconnect from device
-  const disconnectFromDevice = async () => {
-    try {
-      if (readerRef.current) {
-        await readerRef.current.cancel();
-        readerRef.current = null;
-      }
-      
-      if (writerRef.current) {
-        await writerRef.current.close();
-        writerRef.current = null;
-      }
-      
-      if (serialPortRef.current) {
-        await serialPortRef.current.close();
-        serialPortRef.current = null;
-      }
-      
-      setConnectionStatus('disconnected');
-      setConnected(false);
-      setSerialMessages(prev => [...prev, "Disconnected from device"]);
-    } catch (error) {
-      console.error('Error disconnecting:', error);
-      setSerialMessages(prev => [...prev, `Error disconnecting: ${error instanceof Error ? error.message : String(error)}`]);
-    }
-  };
-
-  // Function to read data from the serial port
-  const readFromSerialPort = async (reader: ReadableStreamDefaultReader) => {
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) {
-          break;
-        }
-        
-        // Process the received data
-        const message = new TextDecoder().decode(value);
-        setSerialMessages(prev => [...prev.slice(-49), message].filter(Boolean));
-        
-        // Try to parse sensor data
-        try {
-          // Expected format: "AREA:XX.X,TEMP:XX.X,HUM:XX.X,PH:XX.X"
-          const dataMap: Record<string, number> = {};
-          const dataPairs = message.trim().split(',');
-          
-          dataPairs.forEach(pair => {
-            const [key, value] = pair.split(':');
-            if (key && value) {
-              dataMap[key.trim().toLowerCase()] = parseFloat(value);
-            }
-          });
-          
-          if (Object.keys(dataMap).length > 0) {
-            const newData = {
-              area: 'area' in dataMap ? dataMap.area : currentData.area,
-              temperature: 'temp' in dataMap ? dataMap.temp : currentData.temperature,
-              humidity: 'hum' in dataMap ? dataMap.hum : currentData.humidity,
-              ph: 'ph' in dataMap ? dataMap.ph : currentData.ph,
-              lastUpdate: new Date().toLocaleTimeString()
-            };
-            
-            setCurrentData(newData);
-            
-            // Add to historical data once per hour or when significant change occurs
-            const now = new Date();
-            if (now.getMinutes() === 0 && now.getSeconds() <= 10) {
-              setHistoricalData(prev => [
-                ...prev, 
-                {
-                  day: prev.length > 0 ? prev[prev.length - 1].day + 1 : 1,
-                  ...newData
-                }
-              ]);
-            }
-          }
-        } catch (parseError) {
-          console.error('Error parsing data:', parseError);
-        }
-      }
-    } catch (error) {
-      if (!(error instanceof Error) || error.name !== 'AbortError') {
-        console.error('Error reading from serial port:', error);
-        setSerialMessages(prev => [...prev, `Error reading: ${error instanceof Error ? error.message : String(error)}`]);
-        setConnectionStatus('disconnected');
-        setConnected(false);
-      }
-    }
-  };
 
   // Simulate connecting to Arduino
   const connectToArduino = async () => {
@@ -221,16 +146,27 @@ const WoundTrackingApp = () => {
     setSerialMessages(prev => [...prev, "Demo mode activated (simulated data)"]);
     
     // Set initial data
-    const lastData = mockHistoricalData[mockHistoricalData.length - 1];
-    setCurrentData({
-      area: lastData.area,
-      temperature: typeof lastData.temperature === 'string' ? parseFloat(lastData.temperature) : lastData.temperature,
-      humidity: lastData.humidity,
-      ph: typeof lastData.ph === 'string' ? parseFloat(lastData.ph) : lastData.ph,
+    const mockData = {
+      area: 75,
+      temperature: 36.8,
+      humidity: 65,
+      ph: 6.5,
       lastUpdate: new Date().toLocaleTimeString()
-    });
+    };
     
-    setHistoricalData(mockHistoricalData);
+    setCurrentData(mockData);
+    
+    // Create mock historical data
+    const mockHistory: HistoricalDataPoint[] = Array(15).fill(null).map((_, i) => ({
+      day: i + 1,
+      area: Math.round(100 - 70 * Math.exp(-i / 15) + Math.random() * 5),
+      temperature: (36 + Math.random() * 2).toFixed(1),
+      humidity: Math.round(60 + Math.random() * 20),
+      ph: (6.5 + Math.sin(i / 5) * 0.5).toFixed(1),
+      lastUpdate: new Date(Date.now() - (15 - i) * 24 * 60 * 60 * 1000).toLocaleString()
+    }));
+    
+    setHistoricalData(mockHistory);
   };
 
   // Simulate receiving data from Arduino
@@ -273,14 +209,385 @@ const WoundTrackingApp = () => {
     };
   }, []);
 
+  // Function to read data from the serial port
+  const readFromSerialPort = async (reader: ReadableStreamDefaultReader) => {
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        
+        // Process the received data
+        const message = new TextDecoder().decode(value);
+        setSerialMessages(prev => [...prev.slice(-49), message].filter(Boolean));
+        
+        // Try to parse sensor data
+        try {
+          // Match the Arduino's output format:
+          // "pH Sensor Value (Potentiometer 1): X"
+          // "Temperature (Simulated by Potentiometer 2): X"
+          // "Moisture Sensor Value (Photoresistor): X"
+          
+          const phMatch = message.match(/pH Sensor Value.*?:\s*(\d+\.?\d*)/);
+          const tempMatch = message.match(/Temperature.*?:\s*(\d+\.?\d*)/);
+          const moistureMatch = message.match(/Moisture Sensor Value.*?:\s*(\d+\.?\d*)/);
+          
+          if (phMatch || tempMatch || moistureMatch) {
+            const newData = { ...currentData };
+            
+            if (phMatch && phMatch[1]) {
+              const phValue = parseFloat(phMatch[1]);
+              // pH ranges from 0-14, but most Arduino sensors might return raw values
+              // We'll convert this to a more realistic pH range (typically 4-10 for wounds)
+              newData.ph = Math.max(4, Math.min(10, phValue / 100 * 6 + 4)).toFixed(1);
+            }
+            
+            if (tempMatch && tempMatch[1]) {
+              // Parse temperature directly as it's likely in proper units already
+              newData.temperature = parseFloat(tempMatch[1]);
+            }
+            
+            if (moistureMatch && moistureMatch[1]) {
+              // Convert moisture sensor value (likely 0-1023 from analog read) to humidity percentage
+              const moistureValue = parseFloat(moistureMatch[1]);
+              newData.humidity = Math.round((moistureValue / 1023) * 100);
+            }
+            
+            // Update timestamp
+            newData.lastUpdate = new Date().toLocaleTimeString();
+            
+            setCurrentData(newData);
+            
+            // Add to historical data once per hour or when significant change occurs
+            const now = new Date();
+            if (now.getMinutes() === 0 && now.getSeconds() <= 10) {
+              setHistoricalData(prev => [
+                ...prev, 
+                {
+                  day: prev.length > 0 ? prev[prev.length - 1].day + 1 : 1,
+                  ...newData
+                }
+              ]);
+            }
+          }
+        } catch (parseError) {
+          console.error('Error parsing data:', parseError);
+        }
+      }
+    } catch (error) {
+      if (!(error instanceof Error) || error.name !== 'AbortError') {
+        console.error('Error reading from serial port:', error);
+        setSerialMessages(prev => [...prev, `Error reading: ${error instanceof Error ? error.message : String(error)}`]);
+        setConnectionStatus('disconnected');
+        setConnected(false);
+      }
+    }
+  };
+
+  // ...existing code...
+
+  // New function to handle image upload with wound area estimation
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      setImageFile(file);
+      
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const imageUrl = reader.result as string;
+        setImagePreview(imageUrl);
+        
+        // Estimate wound area based on image
+        estimateWoundArea(imageUrl);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+  
+  // New function to estimate wound area from image
+  const estimateWoundArea = (imageUrl: string) => {
+    // Create a new image element to work with
+    const img = new Image();
+    img.src = imageUrl;
+    
+    img.onload = () => {
+      // Create a canvas element to process the image
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      
+      if (!ctx) {
+        setSerialMessages(prev => [...prev, 
+          `[ERROR] Canvas context not supported in your browser. Please enter wound area manually.`
+        ]);
+        return;
+      }
+      
+      // Set canvas dimensions based on image
+      canvas.width = img.width;
+      canvas.height = img.height;
+      
+      // Draw the image on the canvas
+      ctx.drawImage(img, 0, 0);
+      
+      // Get image data
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+      
+      // Simple wound detection using color thresholds (redness detection)
+      // This is a simplified algorithm - a real app would use more sophisticated image processing
+      let pixelsInWound = 0;
+      const totalPixels = canvas.width * canvas.height;
+      
+      for (let i = 0; i < data.length; i += 4) {
+        const red = data[i];
+        const green = data[i + 1];
+        const blue = data[i + 2];
+        
+        // Check if pixel is likely part of a wound (higher red component)
+        // This is a simplistic approach and would need refinement for real use
+        if (red > 150 && red > green * 1.2 && red > blue * 1.2) {
+          pixelsInWound++;
+        }
+      }
+      
+      // Calculate wound area percentage
+      const woundPercentage = (pixelsInWound / totalPixels) * 100;
+      
+      // Convert to estimated mm² (assuming a typical wound photo context)
+      // In a real app, you'd need a reference scale in the image
+      const estimatedArea = Math.round(woundPercentage * 3);
+      
+      // Set the estimated area, minimum of 5mm² to avoid unrealistic small values
+      setManualAreaValue(Math.max(5, estimatedArea).toString());
+      
+      setSerialMessages(prev => [...prev, 
+        `[IMAGE] Wound image analyzed. Estimated area: ~${Math.max(5, estimatedArea)}mm² (adjust if needed)`
+      ]);
+    };
+    
+    img.onerror = () => {
+      setSerialMessages(prev => [...prev, 
+        `[ERROR] Failed to process image. Please enter wound area manually.`
+      ]);
+    };
+  };
+
+  // New function for adding a manual log entry
+  const addLogEntry = (type: string, description: string) => {
+    const timestamp = new Date().toLocaleString();
+    setManualLogEntries(prev => [...prev, {
+      timestamp,
+      type,
+      description
+    }]);
+  };
+
+  // Function to handle manual log submission
+  const handleManualLogSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    if (manualLogDescription.trim() !== '') {
+      // Add to log entries
+      addLogEntry(manualLogType, manualLogDescription);
+      
+      // Add note to the most recent historical data point if applicable
+      if (historicalData.length > 0) {
+        const updatedHistoricalData = [...historicalData];
+        const latestEntry = updatedHistoricalData[updatedHistoricalData.length - 1];
+        latestEntry.notes = latestEntry.notes 
+          ? `${latestEntry.notes}; ${manualLogDescription}` 
+          : manualLogDescription;
+        setHistoricalData(updatedHistoricalData);
+      }
+      
+      // Log to serial messages
+      setSerialMessages(prev => [...prev, 
+        `[LOG] [${new Date().toLocaleTimeString()}] ${manualLogType}: ${manualLogDescription}`
+      ]);
+      
+      // Reset form
+      setManualLogDescription('');
+      setShowManualLogDialog(false);
+    }
+  };
+
+  // Function to export data
+  const exportData = () => {
+    // Combine historical data with log entries
+    const exportData = {
+      patientId: 'WP' + Math.floor(Math.random() * 10000),
+      exportDate: new Date().toISOString(),
+      historicalData,
+      manualLogEntries,
+      serialMessages
+    };
+    
+    // Create a JSON blob and download it
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `wound-data-export-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    
+    setShowExportDialog(false);
+    addLogEntry('system', 'Data exported successfully');
+  };
+
+  // Function to handle data import
+  const handleImportData = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      const reader = new FileReader();
+      
+      reader.onload = (event) => {
+        try {
+          const importedData = JSON.parse(event.target?.result as string);
+          
+          // Validate the imported data
+          if (importedData.historicalData && Array.isArray(importedData.historicalData)) {
+            // Set historical data
+            setHistoricalData(importedData.historicalData);
+            
+            // Set last entry as current data
+            if (importedData.historicalData.length > 0) {
+              const lastEntry = importedData.historicalData[importedData.historicalData.length - 1];
+              setCurrentData({
+                area: lastEntry.area,
+                temperature: lastEntry.temperature,
+                humidity: lastEntry.humidity,
+                ph: lastEntry.ph,
+                lastUpdate: new Date().toLocaleTimeString()
+              });
+            }
+            
+            // Import log entries if available
+            if (importedData.manualLogEntries && Array.isArray(importedData.manualLogEntries)) {
+              setManualLogEntries(importedData.manualLogEntries);
+            }
+            
+            addLogEntry('system', `Data imported successfully from ${file.name}`);
+            
+            // Add to serial log
+            setSerialMessages(prev => [...prev, 
+              `[IMPORT] Data imported successfully from ${file.name}`
+            ]);
+          } else {
+            // Invalid data format
+            addLogEntry('error', `Invalid data format in ${file.name}`);
+            setSerialMessages(prev => [...prev, 
+              `[ERROR] Failed to import data: Invalid format in ${file.name}`
+            ]);
+          }
+        } catch (error) {
+          console.error('Error importing data:', error);
+          addLogEntry('error', `Error importing data: ${error instanceof Error ? error.message : String(error)}`);
+          setSerialMessages(prev => [...prev, 
+            `[ERROR] Failed to import data: ${error instanceof Error ? error.message : String(error)}`
+          ]);
+        }
+      };
+      
+      reader.readAsText(file);
+    }
+  };
+
+  // Function to trigger file input click
+  const triggerImport = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.click();
+    }
+  };
+
+  // Function to handle manual entry of all data points
+  const handleManualDataEntry = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    
+    const formData = new FormData(e.currentTarget);
+    const area = parseFloat(formData.get('area') as string);
+    const temperature = parseFloat(formData.get('temperature') as string);
+    const humidity = parseFloat(formData.get('humidity') as string);
+    const ph = parseFloat(formData.get('ph') as string);
+    const notes = formData.get('notes') as string;
+    
+    if (!isNaN(area) && !isNaN(temperature) && !isNaN(humidity) && !isNaN(ph)) {
+      const newData = {
+        area,
+        temperature,
+        humidity,
+        ph,
+        lastUpdate: new Date().toLocaleTimeString()
+      };
+      
+      // Update current data
+      setCurrentData(newData);
+      
+      // Add to historical data
+      const newHistoricalDataPoint = {
+        day: historicalData.length > 0 ? historicalData[historicalData.length - 1].day + 1 : 1,
+        ...newData,
+        notes: notes || undefined
+      };
+      
+      setHistoricalData(prev => [...prev, newHistoricalDataPoint]);
+      
+      // Add log entry
+      addLogEntry('manual-data', `Manual data entry: Area=${area}mm², Temp=${temperature}°C, Humidity=${humidity}%, pH=${ph}`);
+      
+      // Add to serial log
+      setSerialMessages(prev => [...prev, 
+        `[MANUAL-DATA] [${newData.lastUpdate}] Area=${area}mm², Temp=${temperature}°C, Humidity=${humidity}%, pH=${ph}`
+      ]);
+      
+      setShowManualLogDialog(false);
+    }
+  };
+
+  // Function to handle area input submission
+  const handleAreaInputSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    const areaValue = parseFloat(manualAreaValue);
+    if (!isNaN(areaValue) && areaValue > 0) {
+      const newData = {
+        ...currentData,
+        area: areaValue,
+        lastUpdate: new Date().toLocaleTimeString()
+      };
+      
+      setCurrentData(newData);
+      setShowAreaInput(false);
+      
+      // Add to historical record
+      setHistoricalData(prev => [
+        ...prev, 
+        {
+          day: prev.length > 0 ? prev[prev.length - 1].day + 1 : 1,
+          ...newData,
+          imageUrl: imagePreview
+        }
+      ]);
+      
+      // Log the manual measurement
+      setSerialMessages(prev => [...prev, 
+        `[MANUAL] [${newData.lastUpdate}] Area measurement recorded: ${areaValue.toFixed(1)}mm²`
+      ]);
+      
+      // Reset image after saving
+      setManualAreaValue('');
+      setImageFile(null);
+      setImagePreview(null);
+    }
+  };
+
   // Function to determine wound healing status
   const getHealingStatus = () => {
     if (currentData.area < 30) return "Good";
     if (currentData.area < 60) return "Moderate";
     return "Concerning";
   };
-
-  // Remove the unused getStatusColor function that's causing the TS6133 error
 
   // Function to get background color based on healing status
   const getStatusBgColor = () => {
@@ -298,7 +605,15 @@ const WoundTrackingApp = () => {
     return Math.min(100, Math.max(0, Math.round((initial - current) / initial * 100)));
   };
 
-  // Custom tooltip that's mobile-friendly
+  // Get healing progress color
+  const getHealingColor = () => {
+    const percentage = healingPercentage();
+    if (percentage > 70) return '#10b981'; // Green for good progress
+    if (percentage > 40) return '#f59e0b'; // Amber for moderate progress
+    return '#f43f5e'; // Red for concerning progress
+  };
+
+  // Custom tooltip component that's mobile-friendly
   const CustomTooltip = ({ active, payload, label }: TooltipProps) => {
     if (active && payload && payload.length) {
       return (
@@ -314,83 +629,6 @@ const WoundTrackingApp = () => {
       );
     }
     return null;
-  };
-
-  // Get healing progress color
-  const getHealingColor = () => {
-    const percentage = healingPercentage();
-    if (percentage > 70) return '#10b981'; // Green for good progress
-    if (percentage > 40) return '#f59e0b'; // Amber for moderate progress
-    return '#f43f5e'; // Red for concerning progress
-  };
-
-  // Custom circular progress indicator component
-  const CircularProgressIndicator = ({ percentage }: { percentage: number }) => {
-    const radius = 80;
-    const strokeWidth = 16;
-    const normalizedRadius = radius - strokeWidth / 2;
-    const circumference = normalizedRadius * 2 * Math.PI;
-    const strokeDashoffset = circumference - (percentage / 100) * circumference;
-    
-    return (
-      <div className="relative flex items-center justify-center">
-        {/* Track circle */}
-        <svg height={radius * 2} width={radius * 2} className="transform -rotate-90">
-          <circle
-            stroke="#1e2f6833"
-            fill="transparent"
-            strokeWidth={strokeWidth}
-            r={normalizedRadius}
-            cx={radius}
-            cy={radius}
-          />
-          {/* Progress circle with gradient */}
-          <circle
-            stroke="url(#progressGradient)"
-            fill="transparent"
-            strokeWidth={strokeWidth}
-            strokeDasharray={`${circumference} ${circumference}`}
-            style={{ strokeDashoffset }}
-            strokeLinecap="round"
-            r={normalizedRadius}
-            cx={radius}
-            cy={radius}
-            className="transition-all duration-700 ease-out"
-          />
-          <defs>
-            <linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor={getHealingColor()} stopOpacity="0.9" />
-              <stop offset="100%" stopColor={getHealingColor()} stopOpacity="0.7" />
-            </linearGradient>
-          </defs>
-        </svg>
-        
-        {/* Inner content */}
-        <div className="absolute flex flex-col items-center justify-center">
-          <span className="text-3xl font-bold text-white">{percentage}%</span>
-          <span className="text-xs text-indigo-200">Healing Progress</span>
-          
-          {/* Indicator icon based on progress */}
-          <div className={`mt-1 rounded-full p-1 ${
-            percentage > 70 ? 'bg-emerald-500/20' : percentage > 40 ? 'bg-amber-500/20' : 'bg-rose-500/20'
-          }`}>
-            {percentage > 70 ? (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-emerald-400" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-              </svg>
-            ) : percentage > 40 ? (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-amber-400" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-              </svg>
-            ) : (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-rose-400" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-              </svg>
-            )}
-          </div>
-        </div>
-      </div>
-    );
   };
 
   // Data for weekly progress chart
@@ -449,6 +687,33 @@ const WoundTrackingApp = () => {
     });
   }, [historicalData]);
 
+  // Function to disconnect from device
+  const disconnectFromDevice = async () => {
+    try {
+      if (readerRef.current) {
+        await readerRef.current.cancel();
+        readerRef.current = null;
+      }
+      
+      if (writerRef.current) {
+        await writerRef.current.close();
+        writerRef.current = null;
+      }
+      
+      if (serialPortRef.current) {
+        await serialPortRef.current.close();
+        serialPortRef.current = null;
+      }
+      
+      setConnectionStatus('disconnected');
+      setConnected(false);
+      setSerialMessages(prev => [...prev, "Disconnected from device"]);
+    } catch (error) {
+      console.error('Error disconnecting:', error);
+      setSerialMessages(prev => [...prev, `Error disconnecting: ${error instanceof Error ? error.message : String(error)}`]);
+    }
+  };
+
   return (
     <div className="flex flex-col min-h-screen bg-indigo-950 text-white">
       <header className="p-4 bg-indigo-900 border-b border-indigo-800 sticky top-0 z-10 shadow-lg">
@@ -457,6 +722,38 @@ const WoundTrackingApp = () => {
             <Activity size={24} className="text-cyan-400 mr-2" />
             <h1 className="text-xl font-bold text-white">Wound Monitor</h1>
           </div>
+          {connected && (
+            <div className="flex gap-2">
+              <button 
+                onClick={() => setShowManualLogDialog(true)}
+                className="flex items-center bg-indigo-800 px-2 py-1 rounded text-xs"
+              >
+                <ClipboardEdit size={14} className="mr-1" />
+                Add Log
+              </button>
+              <button 
+                onClick={() => setShowExportDialog(true)}
+                className="flex items-center bg-indigo-800 px-2 py-1 rounded text-xs"
+              >
+                <Download size={14} className="mr-1" />
+                Export
+              </button>
+              <button 
+                onClick={triggerImport}
+                className="flex items-center bg-indigo-800 px-2 py-1 rounded text-xs"
+              >
+                <FileUp size={14} className="mr-1" />
+                Import
+              </button>
+              <input 
+                type="file"
+                ref={fileInputRef}
+                onChange={handleImportData}
+                accept=".json"
+                className="hidden"
+              />
+            </div>
+          )}
           <div className="flex items-center bg-indigo-800 px-3 py-1 rounded-full">
             {connectionStatus === 'connected' ? (
               <Wifi size={18} className="text-emerald-400 mr-2" />
@@ -471,6 +768,230 @@ const WoundTrackingApp = () => {
           </div>
         </div>
       </header>
+
+      {/* Manual logging dialog */}
+      {showManualLogDialog && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-indigo-900 border border-indigo-700 rounded-lg shadow-2xl w-full max-w-md">
+            <div className="p-4 border-b border-indigo-800">
+              <h3 className="font-semibold text-lg text-white flex items-center">
+                <ClipboardList className="mr-2 h-5 w-5 text-cyan-400" />
+                Manual Data Entry
+              </h3>
+            </div>
+            
+            <div className="p-4">
+              <div className="mb-4">
+                <div className="flex justify-between border-b border-indigo-800 pb-2 mb-4">
+                  <button
+                    className={`px-3 py-1 rounded-md ${manualLogType === 'observation' ? 'bg-cyan-700 text-white' : 'bg-indigo-800/50 text-indigo-300'}`}
+                    onClick={() => setManualLogType('observation')}
+                    type="button"
+                  >
+                    Log Note
+                  </button>
+                  <button
+                    className={`px-3 py-1 rounded-md ${manualLogType === 'data-entry' ? 'bg-cyan-700 text-white' : 'bg-indigo-800/50 text-indigo-300'}`}
+                    onClick={() => setManualLogType('data-entry')}
+                    type="button"
+                  >
+                    All Data
+                  </button>
+                </div>
+                
+                {manualLogType === 'observation' ? (
+                  <form onSubmit={handleManualLogSubmit}>
+                    <div className="mb-4">
+                      <label className="block text-sm font-medium mb-2 text-indigo-300">
+                        Observation Note
+                      </label>
+                      <textarea
+                        value={manualLogDescription}
+                        onChange={(e) => setManualLogDescription(e.target.value)}
+                        className="w-full bg-indigo-800/30 border border-indigo-700 rounded-md p-2 text-white h-24"
+                        placeholder="Enter observation, treatment notes, etc..."
+                        required
+                      />
+                    </div>
+                    
+                    <div className="flex justify-end space-x-3">
+                      <button
+                        type="button"
+                        onClick={() => setShowManualLogDialog(false)}
+                        className="px-4 py-2 bg-indigo-700 hover:bg-indigo-600 rounded-md text-sm"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-md text-sm"
+                      >
+                        Save Note
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <form onSubmit={handleManualDataEntry}>
+                    <div className="grid grid-cols-2 gap-3 mb-4">
+                      <div>
+                        <label className="block text-sm font-medium mb-1 text-indigo-300">
+                          Area (mm²)
+                        </label>
+                        <input
+                          type="number"
+                          name="area"
+                          step="0.1"
+                          defaultValue={currentData.area.toFixed(1)}
+                          className="w-full bg-indigo-800/30 border border-indigo-700 rounded-md p-2 text-white"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium mb-1 text-indigo-300">
+                          Temperature (°C)
+                        </label>
+                        <input
+                          type="number"
+                          name="temperature"
+                          step="0.1"
+                          defaultValue={typeof currentData.temperature === 'string' ? currentData.temperature : currentData.temperature.toFixed(1)}
+                          className="w-full bg-indigo-800/30 border border-indigo-700 rounded-md p-2 text-white"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium mb-1 text-indigo-300">
+                          Humidity (%)
+                        </label>
+                        <input
+                          type="number"
+                          name="humidity"
+                          defaultValue={currentData.humidity}
+                          className="w-full bg-indigo-800/30 border border-indigo-700 rounded-md p-2 text-white"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium mb-1 text-indigo-300">
+                          pH
+                        </label>
+                        <input
+                          type="number"
+                          name="ph"
+                          step="0.1"
+                          defaultValue={typeof currentData.ph === 'string' ? currentData.ph : currentData.ph.toFixed(1)}
+                          className="w-full bg-indigo-800/30 border border-indigo-700 rounded-md p-2 text-white"
+                          required
+                        />
+                      </div>
+                    </div>
+                    <div className="mb-4">
+                      <label className="block text-sm font-medium mb-1 text-indigo-300">
+                        Notes (optional)
+                      </label>
+                      <textarea
+                        name="notes"
+                        className="w-full bg-indigo-800/30 border border-indigo-700 rounded-md p-2 text-white h-16"
+                        placeholder="Add optional notes..."
+                      />
+                    </div>
+                    
+                    <div className="flex justify-end space-x-3">
+                      <button
+                        type="button"
+                        onClick={() => setShowManualLogDialog(false)}
+                        className="px-4 py-2 bg-indigo-700 hover:bg-indigo-600 rounded-md text-sm"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-md text-sm"
+                      >
+                        Save Data
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Export options dialog */}
+      {showExportDialog && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-indigo-900 border border-indigo-700 rounded-lg shadow-2xl w-full max-w-md">
+            <div className="p-4 border-b border-indigo-800">
+              <h3 className="font-semibold text-lg text-white flex items-center">
+                <FileDown className="mr-2 h-5 w-5 text-cyan-400" />
+                Export Data
+              </h3>
+            </div>
+            
+            <div className="p-4">
+              <p className="text-indigo-300 text-sm mb-4">
+                Choose what data to include in your export:
+              </p>
+              
+              <div className="space-y-3 mb-6">
+                <div className="flex items-center">
+                  <input 
+                    type="checkbox" 
+                    id="include-historical" 
+                    className="w-4 h-4 bg-indigo-800 border-indigo-600 rounded mr-2"
+                    defaultChecked
+                  />
+                  <label htmlFor="include-historical" className="text-white">
+                    Historical Data ({historicalData.length} records)
+                  </label>
+                </div>
+                
+                <div className="flex items-center">
+                  <input 
+                    type="checkbox" 
+                    id="include-logs" 
+                    className="w-4 h-4 bg-indigo-800 border-indigo-600 rounded mr-2" 
+                    defaultChecked
+                  />
+                  <label htmlFor="include-logs" className="text-white">
+                    Manual Log Entries ({manualLogEntries.length} entries)
+                  </label>
+                </div>
+                
+                <div className="flex items-center">
+                  <input 
+                    type="checkbox" 
+                    id="include-serial" 
+                    className="w-4 h-4 bg-indigo-800 border-indigo-600 rounded mr-2" 
+                    defaultChecked
+                  />
+                  <label htmlFor="include-serial" className="text-white">
+                    Serial Messages ({serialMessages.length} messages)
+                  </label>
+                </div>
+              </div>
+              
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setShowExportDialog(false)}
+                  className="px-4 py-2 bg-indigo-700 hover:bg-indigo-600 rounded-md text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={exportData}
+                  className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-md text-sm flex items-center"
+                >
+                  <Download size={16} className="mr-1" />
+                  Export
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {!connected ? (
         <div className="flex flex-col items-center justify-center flex-1 p-6 bg-gradient-to-b from-indigo-950 to-indigo-900">
@@ -538,6 +1059,93 @@ const WoundTrackingApp = () => {
           
           <div className="pt-14"> {/* Space for fixed tabs */}
             <TabsContent value="dashboard" className="m-0 p-4">
+              {/* Manual Area Input Dialog */}
+              {showAreaInput && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                  <div className="bg-indigo-900 border border-indigo-700 rounded-lg shadow-2xl w-full max-w-md">
+                    <div className="p-4 border-b border-indigo-800">
+                      <h3 className="font-semibold text-lg text-white flex items-center">
+                        <PencilRuler className="mr-2 h-5 w-5 text-cyan-400" />
+                        Wound Area Measurement
+                      </h3>
+                    </div>
+                    
+                    <form onSubmit={handleAreaInputSubmit} className="p-4">
+                      <div className="mb-4">
+                        <label className="block text-sm font-medium mb-2 text-indigo-300">Upload Wound Image</label>
+                        <div className="flex items-center justify-center">
+                          <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-indigo-600 rounded-lg cursor-pointer bg-indigo-800/30 hover:bg-indigo-800/50 transition-all">
+                            <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                              {imagePreview ? (
+                                <div className="relative w-full h-28 flex items-center justify-center">
+                                  <img src={imagePreview} alt="Wound preview" className="h-28 object-contain rounded" />
+                                  
+                                  {/* Overlay showing detected wound area */}
+                                  <div className="absolute top-0 right-0 bg-indigo-900/80 text-xs px-2 py-1 rounded m-1">
+                                    Est. {manualAreaValue} mm²
+                                  </div>
+                                </div>
+                              ) : (
+                                <>
+                                  <Camera className="w-8 h-8 text-indigo-400 mb-2" />
+                                  <p className="text-xs text-indigo-300">Click to upload image</p>
+                                </>
+                              )}
+                            </div>
+                            <input 
+                              type="file" 
+                              accept="image/*"
+                              capture="environment"
+                              className="hidden" 
+                              onChange={handleImageUpload}
+                            />
+                          </label>
+                        </div>
+                      </div>
+                      
+                      <div className="mb-4">
+                        <label className="block text-sm font-medium mb-2 text-indigo-300">
+                          Wound Area (mm²)
+                          {imagePreview && <span className="text-xs text-indigo-400 ml-2">(Auto-estimated from image)</span>}
+                        </label>
+                        <input 
+                          type="number"
+                          value={manualAreaValue}
+                          onChange={(e) => setManualAreaValue(e.target.value)}
+                          className="w-full bg-indigo-800/30 border border-indigo-700 rounded-md p-2 text-white"
+                          placeholder="Enter area in mm²"
+                          required
+                          min="0.1"
+                          step="0.1"
+                        />
+                      </div>
+                      
+                      <div className="flex justify-end space-x-3">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowAreaInput(false);
+                            setManualAreaValue('');
+                            setImageFile(null);
+                            setImagePreview(null);
+                          }}
+                          className="px-4 py-2 bg-indigo-700 hover:bg-indigo-600 rounded-md text-sm"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-md text-sm"
+                        >
+                          Save Measurement
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              )}
+            
+              {/* Dashboard grid layout */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
                 {/* Healing progress card */}
                 <Card className="shadow-lg bg-indigo-900/70 backdrop-blur-md border-indigo-600/50 md:col-span-2">
@@ -547,8 +1155,17 @@ const WoundTrackingApp = () => {
                         <h3 className="text-lg font-bold text-white">Healing Progress</h3>
                         <p className="text-indigo-300 text-xs">Overall improvement</p>
                       </div>
-                      <div className={`text-xs px-3 py-1 rounded-full ${getStatusBgColor()} text-white font-medium`}>
-                        {getHealingStatus()}
+                      <div className="flex items-center gap-2">
+                        <button 
+                          onClick={() => setShowAreaInput(true)}
+                          className="flex items-center bg-cyan-700 hover:bg-cyan-600 px-3 py-1 rounded-full text-xs"
+                        >
+                          <Camera size={14} className="mr-1" />
+                          Add Measurement
+                        </button>
+                        <div className={`text-xs px-3 py-1 rounded-full ${getStatusBgColor()} text-white font-medium`}>
+                          {getHealingStatus()}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -742,6 +1359,58 @@ const WoundTrackingApp = () => {
                   </CardContent>
                 </Card>
               </div>
+
+              {/* Layout for showing previous wound images */}
+              {historicalData.filter(data => data.imageUrl).length > 0 && (
+                <Card className="shadow-lg bg-indigo-900/70 backdrop-blur-md border-indigo-600/50 mb-4">
+                  <CardHeader className="p-3 pb-0">
+                    <CardTitle className="text-base text-white">Wound Images</CardTitle>
+                    <CardDescription className="text-xs text-indigo-300">Visual healing progression</CardDescription>
+                  </CardHeader>
+                  <CardContent className="p-3 pt-1">
+                    <div className="flex gap-2 overflow-x-auto py-2">
+                      {historicalData
+                        .filter(data => data.imageUrl)
+                        .slice(-5)
+                        .map((data, index) => (
+                          <div key={index} className="flex-none w-24 h-32 relative">
+                            <img 
+                              src={data.imageUrl || ''} 
+                              alt={`Wound day ${data.day}`}
+                              className="w-24 h-24 object-cover rounded-md border border-indigo-700"
+                            />
+                            <div className="absolute bottom-9 left-0 right-0 bg-indigo-900/80 backdrop-blur-sm text-[10px] text-center text-white py-0.5">
+                              Day {data.day}
+                            </div>
+                            <div className="absolute bottom-0 left-0 right-0 bg-indigo-900/80 backdrop-blur-sm text-[10px] text-center text-cyan-300 py-0.5">
+                              {data.area.toFixed(1)} mm²
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+              
+              {/* Log entries card */}
+              {manualLogEntries.length > 0 && (
+                <Card className="shadow-lg bg-indigo-900/70 backdrop-blur-md border-indigo-600/50 mb-4">
+                  <CardHeader className="p-3 pb-0">
+                    <CardTitle className="text-base text-white">Activity Log</CardTitle>
+                    <CardDescription className="text-xs text-indigo-300">Recent notes and observations</CardDescription>
+                  </CardHeader>
+                  <CardContent className="p-3 pt-1">
+                    <div className="space-y-2 max-h-32 overflow-y-auto pr-1">
+                      {manualLogEntries.slice().reverse().map((entry, index) => (
+                        <div key={index} className="text-xs border-l-2 border-cyan-600 pl-2 py-1">
+                          <p className="text-indigo-300">{entry.timestamp}</p>
+                          <p className="text-white">{entry.description}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
             
               {/* Healing trends chart */}
               <Card className="shadow-lg bg-indigo-900/70 backdrop-blur-md border-indigo-600/50 mb-4">
@@ -846,12 +1515,7 @@ const WoundTrackingApp = () => {
                   <div className="h-48">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart
-                        data={[
-                          { week: 'Week 1', rate: 12 },
-                          { week: 'Week 2', rate: 18 },
-                          { week: 'Week 3', rate: 15 },
-                          { week: 'Week 4', rate: 22 },
-                        ]}
+                        data={weeklyProgressData}
                         margin={{ top: 10, right: 10, left: 0, bottom: 5 }}
                       >
                         <CartesianGrid strokeDasharray="3 3" stroke="#4f46e5" opacity={0.2} />
@@ -999,18 +1663,27 @@ const WoundTrackingApp = () => {
                       ? connected 
                         ? demoMode 
                           ? "Demo mode active - showing simulated data"
-                          : "Connection established at 9600 baud" 
+                          : "Connection established at 9600 baud (NOTE: Wound area requires manual measurement)" 
                         : "Web Serial API available - connect to device to begin"
                       : "Web Serial API not supported in this browser - using demo data"
                     }
                   </p>
                   {connected && (
-                    <button 
-                      onClick={disconnectFromDevice}
-                      className="mt-2 px-3 py-1 bg-red-900 hover:bg-red-800 text-white rounded-md text-xs"
-                    >
-                      Disconnect
-                    </button>
+                    <div className="flex gap-2 mt-2">
+                      <button 
+                        onClick={() => setShowAreaInput(true)}
+                        className="px-3 py-1 bg-cyan-700 hover:bg-cyan-600 text-white rounded-md text-xs flex items-center"
+                      >
+                        <PencilRuler size={14} className="mr-1" />
+                        Add Area Measurement
+                      </button>
+                      <button 
+                        onClick={disconnectFromDevice}
+                        className="px-3 py-1 bg-red-900 hover:bg-red-800 text-white rounded-md text-xs"
+                      >
+                        Disconnect
+                      </button>
+                    </div>
                   )}
                 </div>
                 <div className="mb-2 max-h-[70vh] overflow-y-auto">
@@ -1070,4 +1743,79 @@ const WoundTrackingApp = () => {
   );
 };
 
+// Custom circular progress indicator component
+const CircularProgressIndicator = ({ percentage }: { percentage: number }) => {
+  const radius = 80;
+  const strokeWidth = 16;
+  const normalizedRadius = radius - strokeWidth / 2;
+  const circumference = normalizedRadius * 2 * Math.PI;
+  const strokeDashoffset = circumference - (percentage / 100) * circumference;
+  const getHealingColor = () => {
+    if (percentage > 70) return '#10b981'; // Green for good progress
+    if (percentage > 40) return '#f59e0b'; // Amber for moderate progress
+    return '#f43f5e'; // Red for concerning progress
+  };
+  
+  return (
+    <div className="relative flex items-center justify-center">
+      {/* Track circle */}
+      <svg height={radius * 2} width={radius * 2} className="transform -rotate-90">
+        <circle
+          stroke="#1e2f6833"
+          fill="transparent"
+          strokeWidth={strokeWidth}
+          r={normalizedRadius}
+          cx={radius}
+          cy={radius}
+        />
+        {/* Progress circle with gradient */}
+        <circle
+          stroke="url(#progressGradient)"
+          fill="transparent"
+          strokeWidth={strokeWidth}
+          strokeDasharray={`${circumference} ${circumference}`}
+          style={{ strokeDashoffset }}
+          strokeLinecap="round"
+          r={normalizedRadius}
+          cx={radius}
+          cy={radius}
+          className="transition-all duration-700 ease-out"
+        />
+        <defs>
+          <linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor={getHealingColor()} stopOpacity="0.9" />
+            <stop offset="100%" stopColor={getHealingColor()} stopOpacity="0.7" />
+          </linearGradient>
+        </defs>
+      </svg>
+      
+      {/* Inner content */}
+      <div className="absolute flex flex-col items-center justify-center">
+        <span className="text-3xl font-bold text-white">{percentage}%</span>
+        <span className="text-xs text-indigo-200">Healing Progress</span>
+        
+        {/* Indicator icon based on progress */}
+        <div className={`mt-1 rounded-full p-1 ${
+          percentage > 70 ? 'bg-emerald-500/20' : percentage > 40 ? 'bg-amber-500/20' : 'bg-rose-500/20'
+        }`}>
+          {percentage > 70 ? (
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-emerald-400" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+            </svg>
+          ) : percentage > 40 ? (
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-amber-400" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+            </svg>
+          ) : (
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-rose-400" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+            </svg>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export default WoundTrackingApp;
+

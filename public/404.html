@@ -7,19 +7,33 @@
     // Single page apps for GitHub Pages
     // MIT License
     // https://github.com/rafgraph/spa-github-pages
-    var pathSegmentsToKeep = 1;
-
+    var segmentCount = 1;
+    var repository = "WoundGuard";
+    
+    // Check if we're accessing an old URL from WoundTracker
     var l = window.location;
-    l.replace(
-      l.protocol + '//' + l.hostname + (l.port ? ':' + l.port : '') +
-      l.pathname.split('/').slice(0, 1 + pathSegmentsToKeep).join('/') + '/?/' +
-      l.pathname.slice(1).split('/').slice(pathSegmentsToKeep).join('/').replace(/&/g, '~and~') +
-      (l.search ? '&' + l.search.slice(1).replace(/&/g, '~and~') : '') +
-      l.hash
-    );
+    var oldRepo = l.pathname.indexOf("/WoundTracker/") === 0;
+    
+    if (oldRepo) {
+      // Redirect from old repo to new repo
+      window.location.href = l.protocol + "//" + l.hostname + 
+        (l.port ? ":" + l.port : "") + 
+        l.pathname.replace("/WoundTracker/", "/WoundGuard/") +
+        l.search + l.hash;
+    } else {
+      // Normal SPA redirect
+      var l = window.location;
+      l.replace(
+        l.protocol + '//' + l.hostname + (l.port ? ':' + l.port : '') +
+        l.pathname.split('/').slice(0, 1 + segmentCount).join('/') + '/?/' +
+        l.pathname.slice(1).split('/').slice(segmentCount).join('/').replace(/&/g, '~and~') +
+        (l.search ? '&' + l.search.slice(1).replace(/&/g, '~and~') : '') +
+        l.hash
+      );
+    }
   </script>
 </head>
 <body>
-  Redirecting to WoundGuard...
+  <p>Redirecting to WoundGuard...</p>
 </body>
 </html>

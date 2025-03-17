@@ -36,8 +36,6 @@ interface LogEntry {
   description: string;
 }
 
-// ...existing code...
-
 const WoundTrackingApp = () => {
   const [connected, setConnected] = useState(false);
   const [currentData, setCurrentData] = useState<SensorData>({
@@ -71,6 +69,10 @@ const WoundTrackingApp = () => {
   const writerRef = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
+  // Add new state variable for manual mode
+  const [manualMode, setManualMode] = useState(false);
+  const [showWelcomeDialog, setShowWelcomeDialog] = useState(true);
+  
   // Check Web Serial API support on component mount
   useEffect(() => {
     const checkSerialSupport = () => {
@@ -97,6 +99,7 @@ const WoundTrackingApp = () => {
   const connectToArduino = async () => {
     setConnectionStatus('connecting');
     setSerialMessages(prev => [...prev, "Attempting to connect to Arduino..."]);
+    setShowWelcomeDialog(false);
     
     if (isWebSerialSupported) {
       try {
@@ -143,6 +146,7 @@ const WoundTrackingApp = () => {
     setConnectionStatus('connected');
     setConnected(true);
     setSerialMessages(prev => [...prev, "Demo mode activated (simulated data)"]);
+    setShowWelcomeDialog(false);
     
     // Set initial data
     const mockData = {
@@ -166,6 +170,41 @@ const WoundTrackingApp = () => {
     }));
     
     setHistoricalData(mockHistory);
+  };
+
+  // Start manual mode with user-provided data only
+  const startManualMode = () => {
+    setManualMode(true);
+    setConnectionStatus('manual');
+    setConnected(true);
+    setSerialMessages(prev => [...prev, "Manual mode activated (user logs only)"]);
+    
+    // Set initial empty data
+    const initialData = {
+      area: 100, // Start with 100mm² as initial area
+      temperature: 37.0,
+      humidity: 65,
+      ph: 6.5,
+      lastUpdate: new Date().toLocaleTimeString()
+    };
+    
+    setCurrentData(initialData);
+    
+    // Create initial entry for historical data
+    const initialHistoricalDataPoint = {
+      day: 1,
+      ...initialData,
+      notes: "Initial manual entry"
+    };
+    
+    setHistoricalData([initialHistoricalDataPoint]);
+    
+    // Open the dialog to input initial measurement
+    setShowManualLogDialog(true);
+    setManualLogType('data-entry');
+
+    // Close the welcome dialog
+    setShowWelcomeDialog(false);
   };
 
   // Simulate receiving data from Arduino
@@ -283,8 +322,6 @@ const WoundTrackingApp = () => {
       }
     }
   };
-
-  // ...existing code...
 
   // New function to handle image upload with wound area estimation
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -596,10 +633,16 @@ const WoundTrackingApp = () => {
 
   // Calculate healing percentage
   const healingPercentage = () => {
-    if (historicalData.length === 0) return 0;
+    if (historicalData.length <= 0) return 0;
+    
     const initial = historicalData[0]?.area || 100;
     const current = currentData.area;
-    return Math.min(100, Math.max(0, Math.round((initial - current) / initial * 100)));
+    
+    // Ensure we don't divide by zero and handle negative progress
+    if (initial <= 0) return 0;
+    
+    const percentage = Math.min(100, Math.max(0, Math.round((initial - current) / initial * 100)));
+    return percentage;
   };
 
   // Get healing progress color
@@ -714,57 +757,125 @@ const WoundTrackingApp = () => {
   return (
     <div className="flex flex-col min-h-screen bg-indigo-950 text-white">
       <header className="p-4 bg-indigo-900 border-b border-indigo-800 sticky top-0 z-10 shadow-lg">
-        <div className="flex justify-between items-center">
-          <div className="flex items-center">
+        <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center">
+          <div className="flex items-center mb-2 sm:mb-0">
             <Activity size={24} className="text-cyan-400 mr-2" />
-            <h1 className="text-xl font-bold text-white">Wound Monitor</h1>
+            <h1 className="text-xl font-bold text-white">Wound Guard</h1>
           </div>
-          {connected && (
-            <div className="flex gap-2">
-              <button 
-                onClick={() => setShowManualLogDialog(true)}
-                className="flex items-center bg-indigo-800 px-2 py-1 rounded text-xs"
-              >
-                <ClipboardEdit size={14} className="mr-1" />
-                Add Log
-              </button>
-              <button 
-                onClick={() => setShowExportDialog(true)}
-                className="flex items-center bg-indigo-800 px-2 py-1 rounded text-xs"
-              >
-                <Download size={14} className="mr-1" />
-                Export
-              </button>
-              <button 
-                onClick={triggerImport}
-                className="flex items-center bg-indigo-800 px-2 py-1 rounded text-xs"
-              >
-                <FileUp size={14} className="mr-1" />
-                Import
-              </button>
-              <input 
-                type="file"
-                ref={fileInputRef}
-                onChange={handleImportData}
-                accept=".json"
-                className="hidden"
-              />
-            </div>
-          )}
-          <div className="flex items-center bg-indigo-800 px-3 py-1 rounded-full">
-            {connectionStatus === 'connected' ? (
-              <Wifi size={18} className="text-emerald-400 mr-2" />
-            ) : connectionStatus === 'connecting' ? (
-              <Gauge size={18} className="text-cyan-400 mr-2 animate-pulse" />
-            ) : (
-              <WifiOff size={18} className="text-gray-400 mr-2" />
+          <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2">
+            {connected && (
+              <>
+                <button 
+                  onClick={() => setShowManualLogDialog(true)}
+                  className="flex items-center bg-indigo-800 px-1.5 py-1 rounded text-xs"
+                  aria-label="Add Log"
+                >
+                  <ClipboardEdit size={13} className="mr-1" />
+                  <span className="hidden sm:inline">Add Log</span>
+                </button>
+                <button 
+                  onClick={() => setShowExportDialog(true)}
+                  className="flex items-center bg-indigo-800 px-1.5 py-1 rounded text-xs"
+                  aria-label="Export Data"
+                >
+                  <Download size={13} className="mr-1" />
+                  <span className="hidden sm:inline">Export</span>
+                </button>
+                <button 
+                  onClick={triggerImport}
+                  className="flex items-center bg-indigo-800 px-1.5 py-1 rounded text-xs"
+                  aria-label="Import Data"
+                >
+                  <FileUp size={13} className="mr-1" />
+                  <span className="hidden sm:inline">Import</span>
+                </button>
+                <input 
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleImportData}
+                  accept=".json"
+                  className="hidden"
+                />
+              </>
             )}
-            <span className="text-xs text-indigo-200 truncate max-w-32">
-              {connected ? `Last: ${currentData.lastUpdate}` : "Not connected"}
-            </span>
+            <div className="flex items-center bg-indigo-800 px-2 sm:px-3 py-1 rounded-full">
+              {connectionStatus === 'connected' ? (
+                <Wifi size={16} className="text-emerald-400 mr-1 sm:mr-2" />
+              ) : connectionStatus === 'connecting' ? (
+                <Gauge size={16} className="text-cyan-400 mr-1 sm:mr-2 animate-pulse" />
+              ) : (
+                <WifiOff size={16} className="text-gray-400 mr-1 sm:mr-2" />
+              )}
+              <span className="text-xs text-indigo-200 truncate max-w-20 sm:max-w-32">
+                {connected ? `Last: ${currentData.lastUpdate}` : "Not connected"}
+              </span>
+            </div>
           </div>
         </div>
       </header>
+
+      {/* Welcome mode selection dialog */}
+      {showWelcomeDialog && !connected && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-indigo-900 border border-indigo-700 rounded-lg shadow-2xl w-full max-w-md">
+            <div className="p-4 border-b border-indigo-800">
+              <h3 className="font-semibold text-xl text-white flex items-center">
+                <Activity className="mr-2 h-6 w-6 text-cyan-400" />
+                Welcome to WoundGuard
+              </h3>
+            </div>
+            
+            <div className="p-4">
+              <p className="text-indigo-300 text-sm mb-6">
+                Choose how you'd like to use the application:
+              </p>
+              
+              <div className="space-y-4 mb-6">
+                {isWebSerialSupported && (
+                  <button 
+                    onClick={connectToArduino}
+                    className="w-full flex items-center bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white p-3 rounded-lg transition"
+                  >
+                    <div className="bg-blue-500/30 p-2 rounded-md mr-3">
+                      <Wifi className="h-6 w-6" />
+                    </div>
+                    <div className="text-left">
+                      <p className="font-medium">Connect to Arduino</p>
+                      <p className="text-xs text-blue-100">Use with real hardware sensors</p>
+                    </div>
+                  </button>
+                )}
+                
+                <button 
+                  onClick={startDemoMode}
+                  className="w-full flex items-center bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-700 hover:to-indigo-800 text-white p-3 rounded-lg transition"
+                >
+                  <div className="bg-indigo-500/30 p-2 rounded-md mr-3">
+                    <Gauge className="h-6 w-6" />
+                  </div>
+                  <div className="text-left">
+                    <p className="font-medium">Demo Mode</p>
+                    <p className="text-xs text-indigo-100">Try with simulated sensor data</p>
+                  </div>
+                </button>
+                
+                <button 
+                  onClick={startManualMode}
+                  className="w-full flex items-center bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white p-3 rounded-lg transition"
+                >
+                  <div className="bg-purple-500/30 p-2 rounded-md mr-3">
+                    <ClipboardEdit className="h-6 w-6" />
+                  </div>
+                  <div className="text-left">
+                    <p className="font-medium">Manual Mode</p>
+                    <p className="text-xs text-purple-100">Track wound progress with manual entries only</p>
+                  </div>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Manual logging dialog */}
       {showManualLogDialog && (
@@ -995,29 +1106,44 @@ const WoundTrackingApp = () => {
           <div className="w-32 h-32 rounded-full bg-indigo-800 flex items-center justify-center mb-6">
             <Gauge size={64} className="text-cyan-400 animate-pulse" />
           </div>
-          <h2 className="text-2xl font-semibold mb-2 text-white">Connect Device</h2>
-          <p className="text-indigo-300 mb-2 text-center text-sm max-w-xs">
-            {isWebSerialSupported 
-              ? "Connect your Arduino device to start monitoring wound healing progress" 
-              : "Your browser doesn't support direct device connection. Using demo mode."}
+          <h2 className="text-2xl font-semibold mb-2 text-white">Choose an Option</h2>
+          <p className="text-indigo-300 mb-4 text-center text-sm max-w-xs">
+            Select how you'd like to use WoundGuard
           </p>
-          {!isWebSerialSupported && (
-            <p className="text-amber-300 mb-6 text-center text-xs max-w-xs">
-              For real device connectivity, use Chrome, Edge, or other browsers that support Web Serial API.
-            </p>
-          )}
-          <button 
-            onClick={connectToArduino}
-            className="px-6 py-4 w-full max-w-xs bg-gradient-to-r from-cyan-500 to-blue-600 text-white rounded-xl font-medium hover:from-cyan-600 hover:to-blue-700 active:from-cyan-700 active:to-blue-800 transition shadow-lg shadow-indigo-900/50"
-          >
-            {isWebSerialSupported ? "Connect to Arduino" : "Start Demo Mode"}
-          </button>
+          
+          <div className="flex flex-col space-y-4 w-full max-w-xs">
+            {isWebSerialSupported && (
+              <button 
+                onClick={connectToArduino}
+                className="px-6 py-3 bg-gradient-to-r from-cyan-500 to-blue-600 text-white rounded-xl font-medium hover:from-cyan-600 hover:to-blue-700 transition shadow-lg shadow-indigo-900/50 flex items-center justify-center"
+              >
+                <Wifi size={18} className="mr-2" />
+                Connect to Arduino
+              </button>
+            )}
+            
+            <button 
+              onClick={startDemoMode}
+              className="px-6 py-3 bg-gradient-to-r from-indigo-500 to-indigo-600 text-white rounded-xl font-medium hover:from-indigo-600 hover:to-indigo-700 transition shadow-lg shadow-indigo-900/50 flex items-center justify-center"
+            >
+              <Gauge size={18} className="mr-2" />
+              Demo Mode
+            </button>
+            
+            <button 
+              onClick={startManualMode}
+              className="px-6 py-3 bg-gradient-to-r from-purple-500 to-purple-600 text-white rounded-xl font-medium hover:from-purple-600 hover:to-purple-700 transition shadow-lg shadow-indigo-900/50 flex items-center justify-center"
+            >
+              <ClipboardEdit size={18} className="mr-2" />
+              Manual Mode
+            </button>
+          </div>
         </div>
       ) : (
         <Tabs defaultValue="dashboard" className="flex-1">
-          <TabsList className="w-full flex justify-between bg-indigo-900/70 backdrop-blur-md p-1 rounded-none fixed z-10 top-14 border-b border-indigo-600/50 shadow-lg">
+          <TabsList className="w-full flex justify-between bg-indigo-900/70 backdrop-blur-md p-1 rounded-none fixed z-10 top-[72px] sm:top-14 border-b border-indigo-600/50 shadow-lg">
             <TabsTrigger 
-              className="flex-1 text-xs py-3 transition-all duration-300 
+              className="flex-1 text-[10px] sm:text-xs py-2 sm:py-3 transition-all duration-300 
                 data-[state=inactive]:bg-indigo-800/30 data-[state=inactive]:backdrop-blur-sm data-[state=inactive]:text-indigo-200
                 data-[state=active]:bg-gradient-to-r data-[state=active]:from-cyan-500/80 data-[state=active]:to-blue-600/80 
                 data-[state=active]:backdrop-blur-md data-[state=active]:text-white data-[state=active]:shadow-md rounded-md" 
@@ -1026,7 +1152,7 @@ const WoundTrackingApp = () => {
               Dashboard
             </TabsTrigger>
             <TabsTrigger 
-              className="flex-1 text-xs py-3 transition-all duration-300
+              className="flex-1 text-[10px] sm:text-xs py-2 sm:py-3 transition-all duration-300
                 data-[state=inactive]:bg-indigo-800/30 data-[state=inactive]:backdrop-blur-sm data-[state=inactive]:text-indigo-200
                 data-[state=active]:bg-gradient-to-r data-[state=active]:from-cyan-500/80 data-[state=active]:to-blue-600/80 
                 data-[state=active]:backdrop-blur-md data-[state=active]:text-white data-[state=active]:shadow-md rounded-md" 
@@ -1035,16 +1161,16 @@ const WoundTrackingApp = () => {
               Trends
             </TabsTrigger>
             <TabsTrigger 
-              className="flex-1 text-xs py-3 transition-all duration-300
+              className="flex-1 text-[10px] sm:text-xs py-2 sm:py-3 transition-all duration-300
                 data-[state=inactive]:bg-indigo-800/30 data-[state=inactive]:backdrop-blur-sm data-[state=inactive]:text-indigo-200
                 data-[state=active]:bg-gradient-to-r data-[state=active]:from-cyan-500/80 data-[state=active]:to-blue-600/80 
                 data-[state=active]:backdrop-blur-md data-[state=active]:text-white data-[state=active]:shadow-md rounded-md" 
               value="environment"
             >
-              Environment
+              Environ
             </TabsTrigger>
             <TabsTrigger 
-              className="flex-1 text-xs py-3 transition-all duration-300
+              className="flex-1 text-[10px] sm:text-xs py-2 sm:py-3 transition-all duration-300
                 data-[state=inactive]:bg-indigo-800/30 data-[state=inactive]:backdrop-blur-sm data-[state=inactive]:text-indigo-200
                 data-[state=active]:bg-gradient-to-r data-[state=active]:from-cyan-500/80 data-[state=active]:to-blue-600/80 
                 data-[state=active]:backdrop-blur-md data-[state=active]:text-white data-[state=active]:shadow-md rounded-md" 
@@ -1054,7 +1180,7 @@ const WoundTrackingApp = () => {
             </TabsTrigger>
           </TabsList>
           
-          <div className="pt-14"> {/* Space for fixed tabs */}
+          <div className="pt-[56px] sm:pt-14"> {/* Adjusted padding for mobile tabs */}
             <TabsContent value="dashboard" className="m-0 p-4">
               {/* Manual Area Input Dialog */}
               {showAreaInput && (
@@ -1140,7 +1266,7 @@ const WoundTrackingApp = () => {
                   </div>
                 </div>
               )}
-            
+
               {/* Dashboard grid layout */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
                 {/* Healing progress card */}
@@ -1251,7 +1377,7 @@ const WoundTrackingApp = () => {
                     <CardTitle className="text-base text-white">Environmental Factors</CardTitle>
                     <CardDescription className="text-xs text-indigo-300">Current readings</CardDescription>
                   </CardHeader>
-                  <CardContent className="p-3 pt-1">
+                  <CardContent className="p-4 mb-4">
                     <div className="space-y-4">
                       <div className="flex items-center">
                         <ThermometerSun size={18} className="text-rose-400 mr-2" />
@@ -1653,26 +1779,43 @@ const WoundTrackingApp = () => {
             <TabsContent value="serial" className="m-0 p-0">
               <div className="bg-gradient-to-b from-black/80 to-indigo-950/80 backdrop-blur-md text-cyan-400 p-3 font-mono text-xs h-screen overflow-y-auto">
                 <div className="mb-4 p-2 bg-cyan-900/30 backdrop-blur-sm rounded border border-cyan-800/50 border-opacity-30">
-                  <h3 className="text-cyan-300 font-semibold mb-1">Arduino Serial Monitor</h3>
+                  <h3 className="text-cyan-300 font-semibold mb-1">
+                    {manualMode ? "Manual Mode Activity" : "Arduino Serial Monitor"}
+                  </h3>
                   <p className="text-cyan-400 opacity-70 text-xs">
                     {isWebSerialSupported 
                       ? connected 
-                        ? demoMode 
-                          ? "Demo mode active - showing simulated data"
-                          : "Connection established at 9600 baud (NOTE: Wound area requires manual measurement)" 
+                        ? manualMode
+                          ? "Manual mode active - all data based on user entries"
+                          : demoMode 
+                            ? "Demo mode active - showing simulated data"
+                            : "Connection established at 9600 baud (NOTE: Wound area requires manual measurement)" 
                         : "Web Serial API available - connect to device to begin"
                       : "Web Serial API not supported in this browser - using demo data"
                     }
                   </p>
                   {connected && (
                     <div className="flex gap-2 mt-2">
-                      <button 
-                        onClick={() => setShowAreaInput(true)}
-                        className="px-3 py-1 bg-cyan-700 hover:bg-cyan-600 text-white rounded-md text-xs flex items-center"
-                      >
-                        <PencilRuler size={14} className="mr-1" />
-                        Add Area Measurement
-                      </button>
+                      {manualMode ? (
+                        <button 
+                          onClick={() => {
+                            setShowManualLogDialog(true);
+                            setManualLogType('data-entry');
+                          }}
+                          className="px-3 py-1 bg-purple-700 hover:bg-purple-600 text-white rounded-md text-xs flex items-center"
+                        >
+                          <ClipboardEdit size={14} className="mr-1" />
+                          Add Measurement
+                        </button>
+                      ) : (
+                        <button 
+                          onClick={() => setShowAreaInput(true)}
+                          className="px-3 py-1 bg-cyan-700 hover:bg-cyan-600 text-white rounded-md text-xs flex items-center"
+                        >
+                          <PencilRuler size={14} className="mr-1" />
+                          Add Area Measurement
+                        </button>
+                      )}
                       <button 
                         onClick={disconnectFromDevice}
                         className="px-3 py-1 bg-red-900 hover:bg-red-800 text-white rounded-md text-xs"
@@ -1796,7 +1939,7 @@ const CircularProgressIndicator = ({ percentage }: { percentage: number }) => {
         }`}>
           {percentage > 70 ? (
             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-emerald-400" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4a1 1 0 010 1.414z" clipRule="evenodd" />
             </svg>
           ) : percentage > 40 ? (
             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-amber-400" viewBox="0 0 20 20" fill="currentColor">

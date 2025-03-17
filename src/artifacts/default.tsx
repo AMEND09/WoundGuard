@@ -108,7 +108,7 @@ const WoundTrackingApp = () => {
         serialPortRef.current = port;
         
         // Open the port with appropriate settings (adjust baud rate as needed)
-        await port.open({ baudRate: 15200 });
+        await port.open({ baudRate: 115200 });
         
         // Create reader and writer
         const reader = port.readable.getReader();
@@ -1789,7 +1789,7 @@ const WoundTrackingApp = () => {
                           ? "Manual mode active - all data based on user entries"
                           : demoMode 
                             ? "Demo mode active - showing simulated data"
-                            : "Connection established at 9600 baud (NOTE: Wound area requires manual measurement)" 
+                            : "Connection established at 115200 baud (NOTE: Wound area requires manual measurement)" 
                         : "Web Serial API available - connect to device to begin"
                       : "Web Serial API not supported in this browser - using demo data"
                     }

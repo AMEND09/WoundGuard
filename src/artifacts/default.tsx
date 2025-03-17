@@ -56,7 +56,6 @@ const WoundTrackingApp = () => {
   // State variables for manual area measurement
   const [showAreaInput, setShowAreaInput] = useState(false);
   const [manualAreaValue, setManualAreaValue] = useState<string>('');
-  const [imageFile, setImageFile] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   
   // New state variables for manual logging and data export/import
@@ -291,7 +290,6 @@ const WoundTrackingApp = () => {
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
-      setImageFile(file);
       
       const reader = new FileReader();
       reader.onloadend = () => {
@@ -577,7 +575,6 @@ const WoundTrackingApp = () => {
       
       // Reset image after saving
       setManualAreaValue('');
-      setImageFile(null);
       setImagePreview(null);
     }
   };
@@ -1126,7 +1123,6 @@ const WoundTrackingApp = () => {
                           onClick={() => {
                             setShowAreaInput(false);
                             setManualAreaValue('');
-                            setImageFile(null);
                             setImagePreview(null);
                           }}
                           className="px-4 py-2 bg-indigo-700 hover:bg-indigo-600 rounded-md text-sm"

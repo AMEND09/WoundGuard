@@ -1,0 +1,27 @@
+# M5Stack UIFlow 1.0 Blockly Instructions for WoundGuard Simulator
+
+1. Start a new project in UIFlow
+2. Add the following blocks:
+
+WHEN SETUP:
+- Set Screen Background Color to Black
+- Set Text Color to White
+- Draw Text "WoundGuard Simulator" at x:10, y:10
+- Draw Text "-------------------" at x:10, y:30
+- Initialize variables:
+  - ph = 6.5
+  - temp = 36.5
+  - moisture = 70
+
+WHEN LOOP:
+- Set ph = random(40, 70) / 10
+- Set temp = random(345, 380) / 10
+- Set moisture = random(60, 90)
+- Clear Rectangle at x:0, y:50, width:320, height:190, color:Black
+- Draw Text "pH: " + ph at x:20, y:60, color:Cyan
+- Draw Text "Temperature: " + temp + " C" at x:20, y:90, color:Orange
+- Draw Text "Humidity: " + moisture + "%" at x:20, y:120, color:Green
+- Print to Serial "pH Sensor Value (Potentiometer 1): " + ph
+- Print to Serial "Temperature (Simulated by Potentiometer 2): " + temp + "°C"
+- Print to Serial "Moisture Sensor Value (Photoresistor): " + moisture + "%"
+- Wait random(5, 10) seconds

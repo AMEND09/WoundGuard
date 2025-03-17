@@ -108,7 +108,7 @@ const WoundTrackingApp = () => {
         serialPortRef.current = port;
         
         // Open the port with appropriate settings (adjust baud rate as needed)
-        await port.open({ baudRate: 9600 });
+        await port.open({ baudRate: 15200 });
         
         // Create reader and writer
         const reader = port.readable.getReader();

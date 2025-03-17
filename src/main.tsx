@@ -6,7 +6,7 @@ import './index.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <BrowserRouter basename={import.meta.env.DEV ? '/' : '/WoundTracker'}>
+    <BrowserRouter basename={import.meta.env.DEV ? '/' : '/WoundGuard'}>
       <Routes>
         <Route path="/" element={<WoundTrackingApp />} />
         <Route path="*" element={<Navigate to="/" replace />} />

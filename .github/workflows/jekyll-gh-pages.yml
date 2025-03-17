@@ -1,5 +1,5 @@
-# Workflow for deploying WoundTracker to GitHub Pages
-name: Deploy WoundTracker to GitHub Pages
+# Workflow for deploying WoundGuard to GitHub Pages
+name: Deploy WoundGuard to GitHub Pages
 
 on:
   # Runs on pushes targeting the default branch

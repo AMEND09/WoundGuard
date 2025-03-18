@@ -3,6 +3,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, BarChart, Bar } from 'recharts';
 import { Gauge, AlertCircle, Wifi, WifiOff, Droplet, ThermometerSun, Microscope, Activity, Camera, PencilRuler, FileDown, FileUp, ClipboardList, ClipboardEdit, Download } from 'lucide-react';
+import { analyzeWoundImage as analyzeWoundImageUtil, preloadWoundSegmentationModel } from '@/utils/woundAnalysis';
+import DetectionSettings from '@/components/MLToggle';
 
 // Define interfaces for the app
 interface HistoricalDataPoint {
@@ -24,6 +26,22 @@ interface SensorData {
   lastUpdate: string | null;
 }
 
+// New interface for drawing state
+interface DrawingState {
+  isDrawing: boolean;
+  points: Array<{x: number, y: number}>;
+  canvasRect: DOMRect | null;
+}
+
+// New interface for bounding box state
+interface BoundingBoxState {
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  isDrawing: boolean;
+}
+
 interface TooltipProps {
   active?: boolean;
   payload?: Array<any>;
@@ -34,6 +52,18 @@ interface LogEntry {
   timestamp: string;
   type: string;
   description: string;
+}
+
+interface UserOutlineData {
+  points: Array<{x: number, y: number}>;
+  closed: boolean;
+}
+
+interface BoundingBoxData {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 const WoundTrackingApp = () => {
@@ -72,6 +102,51 @@ const WoundTrackingApp = () => {
   // Add new state variable for manual mode
   const [manualMode, setManualMode] = useState(false);
   const [showWelcomeDialog, setShowWelcomeDialog] = useState(true);
+  
+  // Add state variables for drawing
+  const [drawingEnabled, setDrawingEnabled] = useState(false);
+  const [drawingState, setDrawingState] = useState<DrawingState>({
+    isDrawing: false,
+    points: [],
+    canvasRect: null
+  });
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  
+  // Add state variable for sensitivity
+  const [sensitivity, setSensitivity] = useState<'low' | 'medium' | 'high'>('medium');
+  
+  // Add a preview timer ref to control debounced live previews
+  const previewTimerRef = useRef<number | null>(null);
+
+  // Add state variables for drawing mode and bounding box
+  const [drawingMode, setDrawingMode] = useState<'outline' | 'boundingBox'>('outline');
+  const [boundingBoxState, setBoundingBoxState] = useState<BoundingBoxState>({
+    startX: 0,
+    startY: 0,
+    endX: 0,
+    endY: 0,
+    isDrawing: false
+  });
+
+  // Preload ML model in the background when app starts
+  useEffect(() => {
+    const loadModelInBackground = async () => {
+      try {
+        // Silently try to preload the model without showing errors to the user
+        await preloadWoundSegmentationModel();
+      } catch (error) {
+        // Silently fail - we'll handle errors when the user attempts to use ML
+        console.warn('Background model loading failed:', error);
+      }
+    };
+    
+    // Start loading after a short delay to not block initial rendering
+    const timer = setTimeout(() => {
+      loadModelInBackground();
+    }, 2000);
+    
+    return () => clearTimeout(timer);
+  }, []);
   
   // Check Web Serial API support on component mount
   useEffect(() => {
@@ -323,7 +398,7 @@ const WoundTrackingApp = () => {
     }
   };
 
-  // New function to handle image upload with wound area estimation
+  // Enhanced function to handle image upload with better wound area estimation
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
@@ -331,16 +406,47 @@ const WoundTrackingApp = () => {
       const reader = new FileReader();
       reader.onloadend = () => {
         const imageUrl = reader.result as string;
+        // Store original image for reuse during preview updates
         setImagePreview(imageUrl);
         
-        // Estimate wound area based on image
-        estimateWoundArea(imageUrl);
+        // Create a new image element to get the natural dimensions
+        const img = new Image();
+        img.onload = () => {
+          // Once the image is loaded, set up the canvas with correct dimensions
+          if (canvasRef.current) {
+            const canvas = canvasRef.current;
+            const ctx = canvas.getContext('2d');
+            
+            if (ctx) {
+              // Set canvas dimensions to match the actual image dimensions
+              canvas.width = img.naturalWidth;
+              canvas.height = img.naturalHeight;
+              
+              // Clear canvas and draw the image at its natural size
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              
+              // Update the canvas rect for accurate drawing coordinates
+              setDrawingState({
+                isDrawing: false,
+                points: [],
+                canvasRect: canvas.getBoundingClientRect()
+              });
+            }
+          }
+        };
+        img.src = imageUrl;
+        
+        setSerialMessages(prev => [...prev, 
+          `[IMAGE] Image loaded. Draw around wound or click "Analyze" for automatic detection.`
+        ]);
       };
+      
       reader.readAsDataURL(file);
     }
   };
-  
-  // New function to estimate wound area from image
+
+  // Updated function to estimate wound area from image with improved shadow rejection
   const estimateWoundArea = (imageUrl: string) => {
     // Create a new image element to work with
     const img = new Image();
@@ -369,35 +475,192 @@ const WoundTrackingApp = () => {
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = imageData.data;
       
-      // Simple wound detection using color thresholds (redness detection)
-      // This is a simplified algorithm - a real app would use more sophisticated image processing
+      // IMPROVED ALGORITHM: Multi-factor wound detection with shadow rejection
+      
       let pixelsInWound = 0;
       const totalPixels = canvas.width * canvas.height;
       
+      // Pre-processing: Calculate image average color to establish baseline
+      let avgRed = 0, avgGreen = 0, avgBlue = 0;
+      let avgLuma = 0;
+      
+      for (let i = 0; i < data.length; i += 4) {
+        avgRed += data[i];
+        avgGreen += data[i + 1];
+        avgBlue += data[i + 2];
+        
+        // Calculate luminance: 0.299R + 0.587G + 0.114B
+        const luma = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        avgLuma += luma;
+      }
+      
+      const pixelCount = totalPixels;
+      avgRed /= pixelCount;
+      avgGreen /= pixelCount;
+      avgBlue /= pixelCount;
+      avgLuma /= pixelCount;
+      
+      // Calculate standard deviation for luminance to detect shadow thresholds
+      let lumaVariance = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const luma = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        lumaVariance += (luma - avgLuma) * (luma - avgLuma);
+      }
+      
+      const lumaStdDev = Math.sqrt(lumaVariance / pixelCount);
+      const shadowThreshold = avgLuma - lumaStdDev * 1.5; // Pixels darker than this might be shadows
+      
+      // Simple Sobel edge detection to help identify wound boundaries
+      const sobelData = new Uint8ClampedArray(data.length);
+      for (let y = 1; y < canvas.height - 1; y++) {
+        for (let x = 1; x < canvas.width - 1; x++) {
+          const idx = (y * canvas.width + x) * 4;
+          
+          // Calculate intensity gradients in x and y directions (simplified Sobel)
+          const gx = (
+            -1 * data[idx - 4] + 
+            1 * data[idx + 4]
+          );
+          
+          const gy = (
+            -1 * data[idx - canvas.width * 4] + 
+            1 * data[idx + canvas.width * 4]
+          );
+          
+          // Calculate gradient magnitude
+          const mag = Math.sqrt(gx * gx + gy * gy);
+          
+          // Store edge information
+          sobelData[idx] = mag > 25 ? 255 : 0; // Edge threshold
+          sobelData[idx + 1] = mag > 25 ? 255 : 0;
+          sobelData[idx + 2] = mag > 25 ? 255 : 0;
+          sobelData[idx + 3] = 255;
+        }
+      }
+      
+      // Wound detection criteria
       for (let i = 0; i < data.length; i += 4) {
         const red = data[i];
         const green = data[i + 1];
         const blue = data[i + 2];
         
-        // Check if pixel is likely part of a wound (higher red component)
-        // This is a simplistic approach and would need refinement for real use
-        if (red > 150 && red > green * 1.2 && red > blue * 1.2) {
-          pixelsInWound++;
+        // Skip transparent pixels
+        if (data[i + 3] < 128) continue;
+        
+        // Calculate HSV (Hue, Saturation, Value) for better color analysis
+        const max = Math.max(red, green, blue);
+        const min = Math.min(red, green, blue);
+        const delta = max - min;
+        
+        // Compute saturation (0-1)
+        const saturation = max === 0 ? 0 : delta / max;
+        
+        // Compute value/brightness (0-1)
+        const value = max / 255;
+        
+        // Compute luminance for shadow detection
+        const luma = 0.299 * red + 0.587 * green + 0.114 * blue;
+        
+        // Compute hue (0-360)
+        let hue = 0;
+        if (delta === 0) {
+          hue = 0; // Achromatic (gray)
+        } else {
+          if (max === red) {
+            hue = ((green - blue) / delta) % 6;
+          } else if (max === green) {
+            hue = (blue - red) / delta + 2;
+          } else {
+            hue = (red - green) / delta + 4;
+          }
+          hue *= 60;
+          if (hue < 0) hue += 360;
         }
+        
+        // Edge detection factor - check if this pixel is part of an edge
+        const isEdge = sobelData[i] > 0;
+        
+        // IMPROVED WOUND DETECTION WITH SHADOW REJECTION
+        
+        // Shadow detection: shadows tend to be darker but maintain color relationship
+        const isShadow = luma < shadowThreshold && saturation < 0.25;
+        
+        // Compute red dominance - wounds typically have stronger red component
+        const redDominance = red / (green + blue + 1) * 2;
+        
+        // More specific criteria for reddish hues in skin/wound context
+        const isReddish = ((hue >= 0 && hue <= 25) || (hue >= 340 && hue <= 360));
+        const isPinkish = (hue >= 300 && hue <= 339); // Darker wounds can appear more purple/pink
+        
+        const isRedHigher = red > green * 1.15 && red > blue * 1.15;
+        const isReasonablySaturated = saturation > 0.15 && saturation < 0.9; // Upper bound helps exclude overly saturated areas
+        const isReasonablyBright = value > 0.15 && value < 0.90; // Wounds aren't typically the brightest or darkest
+        
+        const redAboveAverage = red > avgRed * 1.1;
+        
+        // Consider a pixel as part of wound if it meets our criteria AND is not a shadow
+        if (!isShadow && (
+            // Primary wound detection criteria
+            ((isReddish || isPinkish) && isRedHigher && isReasonablySaturated && isReasonablyBright && redAboveAverage) ||
+            // Edge-enhanced detection criteria for wound boundaries
+            (isEdge && redDominance > 1.2 && isReasonablyBright)
+          )) {
+          pixelsInWound++;
+          
+          // For visualization - mark detected pixels in a visible color
+          data[i] = 255;      // Red
+          data[i + 1] = 0;    // Green
+          data[i + 2] = 128;  // Blue
+          data[i + 3] = 255;  // Alpha
+        }
+      }
+      
+      // Create visualization of the detected wound for preview
+      const detectedWoundCanvas = document.createElement('canvas');
+      detectedWoundCanvas.width = canvas.width;
+      detectedWoundCanvas.height = canvas.height;
+      const detectedCtx = detectedWoundCanvas.getContext('2d');
+      
+      if (detectedCtx) {
+        // Draw original image at 70% opacity
+        detectedCtx.globalAlpha = 0.7;
+        detectedCtx.drawImage(img, 0, 0);
+        
+        // Overlay wound detection
+        detectedCtx.globalAlpha = 0.5;
+        const overlayImageData = new ImageData(data, canvas.width, canvas.height);
+        detectedCtx.putImageData(overlayImageData, 0, 0);
+        
+        // Create output image URL
+        const detectedImageUrl = detectedWoundCanvas.toDataURL('image/png');
+        setImagePreview(detectedImageUrl);
       }
       
       // Calculate wound area percentage
       const woundPercentage = (pixelsInWound / totalPixels) * 100;
       
-      // Convert to estimated mm² (assuming a typical wound photo context)
-      // In a real app, you'd need a reference scale in the image
-      const estimatedArea = Math.round(woundPercentage * 3);
+      // Apply a minimum threshold to avoid detecting noise
+      // This helps in cases with no actual wound but small areas being falsely detected
+      if (woundPercentage < 0.5) {
+        setSerialMessages(prev => [...prev, 
+          `[IMAGE] No significant wound area detected. Please manually enter the area if needed.`
+        ]);
+        setManualAreaValue('0');
+        return;
+      }
       
-      // Set the estimated area, minimum of 5mm² to avoid unrealistic small values
-      setManualAreaValue(Math.max(5, estimatedArea).toString());
+      // IMPROVED AREA ESTIMATION
+      // Convert to estimated mm² (assuming a typical wound photo context)
+      // Default conversion factor (estimating a 5cm x 5cm field of view)
+      const assumedImageAreaInMM = 2500; // 50mm x 50mm
+      const estimatedArea = Math.round((woundPercentage / 100) * assumedImageAreaInMM);
+      
+      // Set the estimated area, minimum of 1mm² to avoid unrealistic small values
+      setManualAreaValue(Math.max(1, estimatedArea).toString());
       
       setSerialMessages(prev => [...prev, 
-        `[IMAGE] Wound image analyzed. Estimated area: ~${Math.max(5, estimatedArea)}mm² (adjust if needed)`
+        `[IMAGE] Wound image analyzed. Estimated area: ~${Math.max(1, estimatedArea)}mm² (adjust if needed)`,
+        `[IMAGE] Detection used enhanced color analysis with shadow rejection.`
       ]);
     };
     
@@ -580,12 +843,46 @@ const WoundTrackingApp = () => {
     }
   };
 
+  // Function to reset the canvas completely
+  const resetCanvas = () => {
+    // Reset drawing state
+    setDrawingState({
+      isDrawing: false,
+      points: [],
+      canvasRect: null
+    });
+    
+    // Reset sensitivity to default
+    setSensitivity('medium');
+    
+    // Reset drawing mode
+    setDrawingEnabled(false);
+    
+    // Clear the image preview
+    setImagePreview(null);
+    
+    // Reset manual area value
+    setManualAreaValue('');
+    
+    // Clear the canvas if it exists
+    if (canvasRef.current) {
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    }
+  };
+
   // Function to handle area input submission
   const handleAreaInputSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     
     const areaValue = parseFloat(manualAreaValue);
     if (!isNaN(areaValue) && areaValue > 0) {
+      // Save the current image for the historical record (before it gets reset)
+      const currentImageForHistory = imagePreview;
+      
       const newData = {
         ...currentData,
         area: areaValue,
@@ -601,7 +898,7 @@ const WoundTrackingApp = () => {
         {
           day: prev.length > 0 ? prev[prev.length - 1].day + 1 : 1,
           ...newData,
-          imageUrl: imagePreview
+          imageUrl: currentImageForHistory
         }
       ]);
       
@@ -610,9 +907,8 @@ const WoundTrackingApp = () => {
         `[MANUAL] [${newData.lastUpdate}] Area measurement recorded: ${areaValue.toFixed(1)}mm²`
       ]);
       
-      // Reset image after saving
-      setManualAreaValue('');
-      setImagePreview(null);
+      // Reset the canvas and related state completely
+      resetCanvas();
     }
   };
 
@@ -754,6 +1050,723 @@ const WoundTrackingApp = () => {
     }
   };
 
+  // Function to handle drawing start
+  const handleDrawStart = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    if (!drawingEnabled || !canvasRef.current) return;
+    
+    if (drawingMode === 'boundingBox') {
+      handleBoundingBoxStart(e);
+      return;
+    }
+    
+    // Original outline drawing code
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    
+    let clientX: number, clientY: number;
+    
+    // Handle both mouse and touch events
+    if ('touches' in e) {
+      clientX = e.touches[0].clientX;
+      clientY = e.touches[0].clientY;
+    } else {
+      clientX = e.clientX;
+      clientY = e.clientY;
+    }
+    
+    // Calculate position relative to canvas
+    // Scale coordinates to match canvas internal size
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    
+    const x = (clientX - rect.left) * scaleX;
+    const y = (clientY - rect.top) * scaleY;
+    
+    // Start drawing
+    setDrawingState({
+      isDrawing: true,
+      points: [{x, y}],
+      canvasRect: rect
+    });
+    
+    // Draw the first point
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      // Use thicker, semi-transparent highlight style
+      ctx.lineWidth = 12 * scaleX; // Much thicker line for highlighting
+      ctx.strokeStyle = 'rgba(0, 255, 255, 0.4)'; // Semi-transparent cyan
+      ctx.lineCap = 'round'; // Round line caps for smoother highlighting
+      ctx.lineJoin = 'round'; // Round line joins
+      
+      ctx.beginPath();
+      ctx.arc(x, y, 6 * scaleX, 0, Math.PI * 2); // Larger starting point
+      ctx.stroke();
+    }
+  };
+  
+  // Function to handle drawing movement
+  const handleDrawMove = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    if (!canvasRef.current) return;
+    
+    if (drawingMode === 'boundingBox') {
+      handleBoundingBoxMove(e);
+      return;
+    }
+    
+    // Original outline drawing code
+    if (!drawingState.isDrawing || !drawingState.canvasRect) return;
+    
+    e.preventDefault(); // Prevent scrolling on touch devices
+    
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const rect = drawingState.canvasRect;
+    
+    let clientX: number, clientY: number;
+    
+    // Handle both mouse and touch events
+    if ('touches' in e) {
+      clientX = e.touches[0].clientX;
+      clientY = e.touches[0].clientY;
+    } else {
+      clientX = e.clientX;
+      clientY = e.clientY;
+    }
+    
+    // Calculate position relative to canvas with proper scaling
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    
+    const x = (clientX - rect.left) * scaleX;
+    const y = (clientY - rect.top) * scaleY;
+    
+    // Add point to array
+    setDrawingState(prev => ({
+      ...prev,
+      points: [...prev.points, {x, y}]
+    }));
+    
+    // Draw the line
+    if (ctx && drawingState.points.length > 0) {
+      const prevPoint = drawingState.points[drawingState.points.length - 1];
+      
+      // Use thicker, semi-transparent highlight style
+      ctx.lineWidth = 12 * scaleX; // Much thicker line for highlighting
+      ctx.strokeStyle = 'rgba(0, 255, 255, 0.4)'; // Semi-transparent cyan
+      ctx.lineCap = 'round'; // Round line caps for smoother highlighting
+      ctx.lineJoin = 'round'; // Round line joins
+      
+      ctx.beginPath();
+      ctx.moveTo(prevPoint.x, prevPoint.y);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+    }
+  };
+  
+  // Function to handle drawing end
+  const handleDrawEnd = () => {
+    if (drawingMode === 'boundingBox') {
+      handleBoundingBoxEnd();
+      return;
+    }
+    
+    // Original outline drawing code
+    if (!drawingState.isDrawing) return;
+    
+    // Complete the drawing
+    setDrawingState(prev => ({
+      ...prev,
+      isDrawing: false,
+    }));
+    
+    // Draw closed path if we have enough points
+    if (drawingState.points.length > 2 && canvasRef.current) {
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext('2d');
+      const rect = drawingState.canvasRect;
+      
+      if (ctx && rect) {
+        const firstPoint = drawingState.points[0];
+        const lastPoint = drawingState.points[drawingState.points.length - 1];
+        
+        const scaleX = canvas.width / rect.width;
+        
+        // Use thicker, semi-transparent highlight style
+        ctx.lineWidth = 12 * scaleX; // Much thicker line for highlighting
+        ctx.strokeStyle = 'rgba(0, 255, 255, 0.4)'; // Semi-transparent cyan
+        ctx.lineCap = 'round'; // Round line caps for smoother highlighting
+        ctx.lineJoin = 'round'; // Round line joins
+        
+        ctx.beginPath();
+        ctx.moveTo(lastPoint.x, lastPoint.y);
+        ctx.lineTo(firstPoint.x, firstPoint.y);
+        ctx.stroke();
+        
+        // Now close the path in the points array
+        setDrawingState(prev => ({
+          ...prev,
+          points: [...prev.points, {...firstPoint}]
+        }));
+      }
+    }
+  };
+
+  // Function to handle bounding box drawing start
+  const handleBoundingBoxStart = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    if (!drawingEnabled || !canvasRef.current || drawingMode !== 'boundingBox') return;
+    
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    
+    let clientX: number, clientY: number;
+    
+    // Handle both mouse and touch events
+    if ('touches' in e) {
+      clientX = e.touches[0].clientX;
+      clientY = e.touches[0].clientY;
+    } else {
+      clientX = e.clientX;
+      clientY = e.clientY;
+    }
+    
+    // Calculate position relative to canvas with proper scaling
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    
+    const x = (clientX - rect.left) * scaleX;
+    const y = (clientY - rect.top) * scaleY;
+    
+    // Start drawing the bounding box
+    setBoundingBoxState({
+      startX: x,
+      startY: y,
+      endX: x,
+      endY: y,
+      isDrawing: true
+    });
+    
+    // Reset any previous outline drawing
+    setDrawingState({
+      isDrawing: false,
+      points: [],
+      canvasRect: rect
+    });
+  };
+  
+  // Function to handle bounding box drawing movement
+  const handleBoundingBoxMove = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    if (!boundingBoxState.isDrawing || !canvasRef.current || drawingMode !== 'boundingBox') return;
+    
+    e.preventDefault(); // Prevent scrolling on touch devices
+    
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    
+    let clientX: number, clientY: number;
+    
+    // Handle both mouse and touch events
+    if ('touches' in e) {
+      clientX = e.touches[0].clientX;
+      clientY = e.touches[0].clientY;
+    } else {
+      clientX = e.clientX;
+      clientY = e.clientY;
+    }
+    
+    // Calculate position relative to canvas with proper scaling
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    
+    const x = (clientX - rect.left) * scaleX;
+    const y = (clientY - rect.top) * scaleY;
+    
+    // Update the end position of the bounding box
+    setBoundingBoxState(prev => ({
+      ...prev,
+      endX: x,
+      endY: y
+    }));
+    
+    // Redraw the canvas with the current bounding box
+    if (canvas && imagePreview) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        // Clear canvas and redraw image
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        // Load and draw the original image
+        const img = new Image();
+        img.onload = () => {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          
+          // Draw the bounding box
+          const { startX, startY } = boundingBoxState;
+          const width = x - startX;
+          const height = y - startY;
+          
+          ctx.strokeStyle = 'rgba(0, 255, 255, 0.8)';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(startX, startY, width, height);
+          
+          // Draw handles at corners for visibility
+          ctx.fillStyle = 'rgba(0, 255, 255, 0.8)';
+          const handleSize = 6;
+          ctx.fillRect(startX - handleSize/2, startY - handleSize/2, handleSize, handleSize);
+          ctx.fillRect(startX + width - handleSize/2, startY - handleSize/2, handleSize, handleSize);
+          ctx.fillRect(startX - handleSize/2, startY + height - handleSize/2, handleSize, handleSize);
+          ctx.fillRect(startX + width - handleSize/2, startY + height - handleSize/2, handleSize, handleSize);
+        };
+        img.src = imagePreview;
+      }
+    }
+  };
+  
+  // Function to handle bounding box drawing end
+  const handleBoundingBoxEnd = () => {
+    if (!boundingBoxState.isDrawing || drawingMode !== 'boundingBox') return;
+    
+    // Complete the drawing
+    setBoundingBoxState(prev => ({
+      ...prev,
+      isDrawing: false,
+    }));
+    
+    // Trigger preview update with the new bounding box
+    updatePreview();
+  };
+
+  // Function to clear drawing and reset to original image
+  const clearDrawing = () => {
+    if (!canvasRef.current || !imagePreview) return;
+    
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    
+    if (ctx) {
+      // Clear canvas and redraw original image
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Load image to canvas
+      const img = new Image();
+      img.onload = () => {
+        // Keep the canvas dimensions the same, but redraw the image
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      };
+      img.src = imagePreview;
+    }
+    
+    // Reset drawing states
+    setDrawingState({
+      isDrawing: false,
+      points: [],
+      canvasRect: canvas.getBoundingClientRect()
+    });
+    
+    setBoundingBoxState({
+      startX: 0,
+      startY: 0,
+      endX: 0,
+      endY: 0,
+      isDrawing: false
+    });
+  };
+
+  // Function to normalize the bounding box (handle negative width/height)
+  const getNormalizedBoundingBox = () => {
+    const { startX, startY, endX, endY } = boundingBoxState;
+    return {
+      x: Math.min(startX, endX),
+      y: Math.min(startY, endY),
+      width: Math.abs(endX - startX),
+      height: Math.abs(endY - startY)
+    };
+  };
+
+  // Function to create a debounced live preview update
+  const updatePreview = () => {
+    // Clear any existing timeout
+    if (previewTimerRef.current) {
+      window.clearTimeout(previewTimerRef.current);
+    }
+    
+    // Set a new timeout to update the preview after a short delay
+    previewTimerRef.current = window.setTimeout(() => {
+      analyzeWoundImage(true); // true = preview mode (don't update messages)
+    }, 400); // Debounce for smoother experience
+  };
+
+  // Function to analyze image with or without user outline
+  const analyzeWoundImage = (isPreview = false) => {
+    if (!imagePreview) return;
+    
+    if (!isPreview) {
+      setSerialMessages(prev => [...prev, 
+        `[IMAGE] Analyzing wound image, please wait...`
+      ]);
+    }
+    
+    // Make sure we have a consistent canvas reference
+    if (!canvasRef.current) {
+      if (!isPreview) {
+        setSerialMessages(prev => [...prev, 
+          `[ERROR] Canvas reference not found. Please try again.`
+        ]);
+      }
+      return;
+    }
+    
+    // Save original user drawing to reapply later
+    let userDrawing: ImageData | null = null;
+    if (!isPreview && drawingMode === 'outline' && drawingState.points.length > 2) {
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = canvasRef.current.width;
+      tempCanvas.height = canvasRef.current.height;
+      const tempCtx = tempCanvas.getContext('2d');
+      
+      if (tempCtx) {
+        tempCtx.drawImage(canvasRef.current, 0, 0);
+        userDrawing = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+      }
+    }
+    
+    // Prepare user outline or bounding box data
+    let userOutline: UserOutlineData | undefined = undefined;
+    let boundingBox: BoundingBoxData | undefined = undefined;
+    
+    if (drawingMode === 'outline' && drawingState.points.length > 2) {
+      userOutline = {
+        points: drawingState.points,
+        closed: true
+      };
+    } else if (drawingMode === 'boundingBox') {
+      const box = getNormalizedBoundingBox();
+      // Only use bounding box if it has meaningful dimensions
+      if (box.width > 10 && box.height > 10) {
+        boundingBox = box;
+      }
+    }
+    
+    // If we're not using user outline or bounding box, indicate we're using automatic segmentation
+    if (!isPreview && !userOutline && !boundingBox) {
+      setSerialMessages(prev => [...prev, 
+        `[IMAGE] No highlighting or bounding box detected. Using automatic wound segmentation...`
+      ]);
+    }
+    
+    // Use the advanced wound analysis utility with the selected sensitivity and drawing method
+    analyzeWoundImageUtil(imagePreview, { 
+      sensitivityLevel: sensitivity,
+      assumedImageSize: 2500, // 50mm x 50mm default field of view
+      userOutline,
+      boundingBox,
+      useML: true // Enable ML and advanced algorithms like GrabCut
+    })
+    .then(result => {
+      // Set the processed image with detection visualization
+      // But don't update imagePreview directly since we need to draw user highlights on it
+      
+      // Reload the image on the canvas with the analyzed version
+      const img = new Image();
+      img.onload = () => {
+        if (canvasRef.current) {
+          const canvas = canvasRef.current;
+          const ctx = canvas.getContext('2d');
+          
+          if (ctx) {
+            // Draw the processed image
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            
+            // If we have user drawings, reapply them
+            if (userDrawing && !isPreview && drawingMode === 'outline') {
+              // Redraw the user's highlights with the appropriate style
+              ctx.globalAlpha = 0.4; // Semi-transparent
+              
+              if (drawingState.points.length > 2) {
+                ctx.lineWidth = 12; // Thicker line for highlighting
+                ctx.strokeStyle = 'rgba(0, 255, 255, 0.6)'; // Semi-transparent cyan
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.beginPath();
+                
+                // Redraw each segment of the user's path
+                ctx.moveTo(drawingState.points[0].x, drawingState.points[0].y);
+                for (let i = 1; i < drawingState.points.length; i++) {
+                  ctx.lineTo(drawingState.points[i].x, drawingState.points[i].y);
+                }
+                
+                ctx.stroke();
+              }
+              
+              ctx.globalAlpha = 1.0; // Reset alpha
+            } else if (!isPreview && drawingMode === 'boundingBox' && boundingBox) {
+              // Redraw the user's bounding box
+              const { x, y, width, height } = boundingBox;
+              ctx.strokeStyle = 'rgba(0, 255, 255, 0.8)';
+              ctx.lineWidth = 2;
+              ctx.setLineDash([5, 3]);
+              ctx.strokeRect(x, y, width, height);
+              ctx.setLineDash([]);
+              
+              // Draw handles at corners
+              ctx.fillStyle = 'rgba(0, 255, 255, 0.8)';
+              const handleSize = 6;
+              ctx.fillRect(x - handleSize/2, y - handleSize/2, handleSize, handleSize);
+              ctx.fillRect(x + width - handleSize/2, y - handleSize/2, handleSize, handleSize);
+              ctx.fillRect(x - handleSize/2, y + height - handleSize/2, handleSize, handleSize);
+              ctx.fillRect(x + width - handleSize/2, y + height - handleSize/2, handleSize, handleSize);
+            }
+            
+            // Save the final canvas as the new image preview
+            setImagePreview(canvas.toDataURL('image/png'));
+          }
+        }
+      };
+      img.src = result.processedImageUrl;
+      
+      // Set the estimated area
+      setManualAreaValue(result.estimatedArea.toString());
+      
+      // Log the results with sensitivity info if not in preview mode
+      if (!isPreview) {
+        let detectionMethod = "Automatic wound segmentation";
+        if (userOutline) {
+          detectionMethod = "User-guided outline detection";
+        } else if (boundingBox) {
+          detectionMethod = "User-defined bounding box detection";
+        }
+          
+        setSerialMessages(prev => [...prev, 
+          `[IMAGE] Wound image analyzed. Estimated area: ~${result.estimatedArea}mm² (adjust if needed)`,
+          `[IMAGE] Detection confidence: ${Math.round(result.confidence * 100)}%`,
+          `[IMAGE] Detection method: ${detectionMethod} (${result.detectionMethod})`
+        ]);
+      }
+    })
+    .catch(error => {
+      // Fallback to the built-in estimation method if advanced analysis fails
+      if (!isPreview) {
+        estimateWoundArea(imagePreview);
+        
+        setSerialMessages(prev => [...prev, 
+          `[WARNING] Analysis failed: ${error.message}. Using simplified detection.`
+        ]);
+      }
+    });
+  };
+
+  // Modified area input dialog to include drawing capabilities and sensitivity settings
+  const renderAreaInputDialog = () => {
+    if (!showAreaInput) return null;
+    
+    return (
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div className="bg-indigo-900 border border-indigo-700 rounded-lg shadow-2xl w-full max-w-md flex flex-col max-h-[90vh]">
+          <div className="p-4 border-b border-indigo-800 flex-shrink-0">
+            <h3 className="font-semibold text-lg text-white flex items-center">
+              <PencilRuler className="mr-2 h-5 w-5 text-cyan-400" />
+              Wound Area Measurement
+            </h3>
+          </div>
+          
+          <form onSubmit={handleAreaInputSubmit} className="flex flex-col flex-1 overflow-hidden">
+            <div className="p-4 overflow-y-auto flex-1 custom-scrollbar">
+              <div className="mb-4">
+                <div className="flex justify-between items-center mb-2">
+                  <label className="block text-sm font-medium text-indigo-300">
+                    {imagePreview ? "Wound Image" : "Upload Wound Image"}
+                  </label>
+                  {imagePreview && (
+                    <div className="flex gap-2">
+                      <div className="flex p-1 bg-indigo-800 rounded">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDrawingEnabled(!drawingEnabled);
+                            setDrawingMode('outline');
+                          }}
+                          className={`text-xs px-2 py-1 rounded ${
+                            drawingEnabled && drawingMode === 'outline' 
+                              ? 'bg-cyan-600 text-white' 
+                              : 'bg-indigo-800 text-indigo-300'
+                          }`}
+                          title="Draw around the wound outline"
+                        >
+                          Outline
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDrawingEnabled(!drawingEnabled);
+                            setDrawingMode('boundingBox');
+                          }}
+                          className={`text-xs px-2 py-1 rounded ${
+                            drawingEnabled && drawingMode === 'boundingBox' 
+                              ? 'bg-cyan-600 text-white' 
+                              : 'bg-indigo-800 text-indigo-300'
+                          }`}
+                          title="Draw a rectangular box around the wound"
+                        >
+                          Box
+                        </button>
+                      </div>
+                      {drawingEnabled && (
+                        <button
+                          type="button"
+                          onClick={clearDrawing}
+                          className="text-xs px-2 py-1 rounded bg-indigo-700 text-indigo-300"
+                        >
+                          Clear
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => analyzeWoundImage()}
+                        className="text-xs px-2 py-1 rounded bg-green-700 text-white"
+                      >
+                        Analyze
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center justify-center relative">
+                  {!imagePreview ? (
+                    <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-indigo-600 rounded-lg cursor-pointer bg-indigo-800/30 hover:bg-indigo-800/50 transition-all">
+                      <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                        <Camera className="w-8 h-8 text-indigo-400 mb-2" />
+                        <p className="text-xs text-indigo-300">Click to upload image</p>
+                      </div>
+                      <input 
+                        type="file" 
+                        accept="image/*"
+                        capture="environment"
+                        className="hidden" 
+                        onChange={handleImageUpload}
+                      />
+                    </label>
+                  ) : (
+                    <div className="relative w-full overflow-hidden rounded border border-indigo-700">
+                      <canvas
+                        ref={canvasRef}
+                        className={`w-full h-auto object-contain ${drawingEnabled ? 'cursor-crosshair' : 'cursor-default'}`}
+                        onMouseDown={handleDrawStart}
+                        onMouseMove={handleDrawMove}
+                        onMouseUp={handleDrawEnd}
+                        onMouseLeave={handleDrawEnd}
+                        onTouchStart={handleDrawStart}
+                        onTouchMove={handleDrawMove}
+                        onTouchEnd={handleDrawEnd}
+                      />
+                      <div className="absolute top-0 right-0 bg-indigo-900/80 text-xs px-2 py-1 rounded m-1">
+                        {manualAreaValue ? `Est. ${manualAreaValue} mm²` : "Upload or select image"}
+                      </div>
+                      {drawingEnabled && (
+                        <div className="absolute bottom-0 left-0 right-0 bg-indigo-900/80 text-[10px] text-center text-cyan-300 py-1">
+                          {drawingMode === 'outline' 
+                            ? "Draw around the wound to highlight the affected area" 
+                            : "Draw a rectangle around the wound area"}
+                        </div>
+                      )}
+                      {/* Add a button to allow uploading a different image */}
+                      <div className="absolute top-0 left-0 m-1">
+                        <label 
+                          className="bg-indigo-900/80 text-xs px-2 py-1 rounded cursor-pointer hover:bg-indigo-800/80"
+                          title="Upload new image"
+                        >
+                          <Camera size={14} />
+                          <input 
+                            type="file" 
+                            accept="image/*"
+                            capture="environment"
+                            className="hidden" 
+                            onChange={handleImageUpload}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {/* Enhanced tip for users about auto-segmentation */}
+                {imagePreview && !drawingEnabled && (
+                  <div className="mt-1 text-[10px] text-indigo-300 text-center">
+                    Tip: Click "Outline" to trace the wound or "Box" to draw a rectangle around it, 
+                    or just click "Analyze" for automatic segmentation
+                  </div>
+                )}
+              </div>
+
+              {/* Replace ML toggle with the DetectionSettings component */}
+              {imagePreview && (
+                <DetectionSettings
+                  sensitivity={sensitivity}
+                  onChange={setSensitivity}
+                  className="mb-4"
+                />
+              )}
+              
+              <div className="mb-4">
+                <label className="block text-sm font-medium mb-2 text-indigo-300">
+                  Wound Area (mm²)
+                  {imagePreview && <span className="text-xs text-indigo-400 ml-2">
+                    {drawingMode === 'outline' && drawingState.points.length > 2 
+                      ? "(User-outlined estimate)" 
+                      : drawingMode === 'boundingBox' && boundingBoxState.endX !== boundingBoxState.startX
+                      ? "(User-boxed estimate)"
+                      : "(Auto-segmented estimate)"
+                    }
+                  </span>}
+                </label>
+                <input 
+                  type="number"
+                  value={manualAreaValue}
+                  onChange={(e) => setManualAreaValue(e.target.value)}
+                  className="w-full bg-indigo-800/30 border border-indigo-700 rounded-md p-2 text-white"
+                  placeholder="Enter area in mm²"
+                  required
+                  min="0.1"
+                  step="0.1"
+                />
+                {imagePreview && (
+                  <p className="text-xs text-indigo-300 mt-1">
+                    Adjust the value if needed based on known reference size.
+                  </p>
+                )}
+              </div>
+            </div>
+            
+            <div className="p-4 border-t border-indigo-800 flex justify-end space-x-3 flex-shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAreaInput(false);
+                  // Just disable drawing mode but keep the image preview in case user wants to
+                  // continue working with the current image
+                  setDrawingEnabled(false);
+                }}
+                className="px-4 py-2 bg-indigo-700 hover:bg-indigo-600 rounded-md text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-md text-sm"
+              >
+                Save Measurement
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  };
+
+  // After drawing, trigger a preview update to show detection results
+  useEffect(() => {
+    if (drawingState.points.length > 3) {
+      updatePreview();
+    }
+  }, [drawingState.points.length]);
+
   return (
     <div className="flex flex-col min-h-screen bg-indigo-950 text-white">
       <header className="p-4 bg-indigo-900 border-b border-indigo-800 sticky top-0 z-10 shadow-lg">
@@ -880,16 +1893,16 @@ const WoundTrackingApp = () => {
       {/* Manual logging dialog */}
       {showManualLogDialog && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-indigo-900 border border-indigo-700 rounded-lg shadow-2xl w-full max-w-md">
-            <div className="p-4 border-b border-indigo-800">
+          <div className="bg-indigo-900 border border-indigo-700 rounded-lg shadow-2xl w-full max-w-md flex flex-col max-h-[90vh]">
+            <div className="p-4 border-b border-indigo-800 flex-shrink-0">
               <h3 className="font-semibold text-lg text-white flex items-center">
                 <ClipboardList className="mr-2 h-5 w-5 text-cyan-400" />
                 Manual Data Entry
               </h3>
             </div>
             
-            <div className="p-4">
-              <div className="mb-4">
+            <div className="flex-1 overflow-hidden">
+              <div className="p-4 overflow-y-auto max-h-full custom-scrollbar">
                 <div className="flex justify-between border-b border-indigo-800 pb-2 mb-4">
                   <button
                     className={`px-3 py-1 rounded-md ${manualLogType === 'observation' ? 'bg-cyan-700 text-white' : 'bg-indigo-800/50 text-indigo-300'}`}
@@ -1030,15 +2043,15 @@ const WoundTrackingApp = () => {
       {/* Export options dialog */}
       {showExportDialog && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-indigo-900 border border-indigo-700 rounded-lg shadow-2xl w-full max-w-md">
-            <div className="p-4 border-b border-indigo-800">
+          <div className="bg-indigo-900 border border-indigo-700 rounded-lg shadow-2xl w-full max-w-md flex flex-col max-h-[90vh]">
+            <div className="p-4 border-b border-indigo-800 flex-shrink-0">
               <h3 className="font-semibold text-lg text-white flex items-center">
                 <FileDown className="mr-2 h-5 w-5 text-cyan-400" />
                 Export Data
               </h3>
             </div>
             
-            <div className="p-4">
+            <div className="p-4 overflow-y-auto custom-scrollbar flex-1">
               <p className="text-indigo-300 text-sm mb-4">
                 Choose what data to include in your export:
               </p>
@@ -1080,22 +2093,22 @@ const WoundTrackingApp = () => {
                   </label>
                 </div>
               </div>
-              
-              <div className="flex justify-end space-x-3">
-                <button
-                  onClick={() => setShowExportDialog(false)}
-                  className="px-4 py-2 bg-indigo-700 hover:bg-indigo-600 rounded-md text-sm"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={exportData}
-                  className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-md text-sm flex items-center"
-                >
-                  <Download size={16} className="mr-1" />
-                  Export
-                </button>
-              </div>
+            </div>
+            
+            <div className="p-4 border-t border-indigo-800 flex justify-end space-x-3 flex-shrink-0">
+              <button
+                onClick={() => setShowExportDialog(false)}
+                className="px-4 py-2 bg-indigo-700 hover:bg-indigo-600 rounded-md text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={exportData}
+                className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-md text-sm flex items-center"
+              >
+                <Download size={16} className="mr-1" />
+                Export
+              </button>
             </div>
           </div>
         </div>
@@ -1183,89 +2196,7 @@ const WoundTrackingApp = () => {
           <div className="pt-[56px] sm:pt-14"> {/* Adjusted padding for mobile tabs */}
             <TabsContent value="dashboard" className="m-0 p-4">
               {/* Manual Area Input Dialog */}
-              {showAreaInput && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-                  <div className="bg-indigo-900 border border-indigo-700 rounded-lg shadow-2xl w-full max-w-md">
-                    <div className="p-4 border-b border-indigo-800">
-                      <h3 className="font-semibold text-lg text-white flex items-center">
-                        <PencilRuler className="mr-2 h-5 w-5 text-cyan-400" />
-                        Wound Area Measurement
-                      </h3>
-                    </div>
-                    
-                    <form onSubmit={handleAreaInputSubmit} className="p-4">
-                      <div className="mb-4">
-                        <label className="block text-sm font-medium mb-2 text-indigo-300">Upload Wound Image</label>
-                        <div className="flex items-center justify-center">
-                          <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-indigo-600 rounded-lg cursor-pointer bg-indigo-800/30 hover:bg-indigo-800/50 transition-all">
-                            <div className="flex flex-col items-center justify-center pt-5 pb-6">
-                              {imagePreview ? (
-                                <div className="relative w-full h-28 flex items-center justify-center">
-                                  <img src={imagePreview} alt="Wound preview" className="h-28 object-contain rounded" />
-                                  
-                                  {/* Overlay showing detected wound area */}
-                                  <div className="absolute top-0 right-0 bg-indigo-900/80 text-xs px-2 py-1 rounded m-1">
-                                    Est. {manualAreaValue} mm²
-                                  </div>
-                                </div>
-                              ) : (
-                                <>
-                                  <Camera className="w-8 h-8 text-indigo-400 mb-2" />
-                                  <p className="text-xs text-indigo-300">Click to upload image</p>
-                                </>
-                              )}
-                            </div>
-                            <input 
-                              type="file" 
-                              accept="image/*"
-                              capture="environment"
-                              className="hidden" 
-                              onChange={handleImageUpload}
-                            />
-                          </label>
-                        </div>
-                      </div>
-                      
-                      <div className="mb-4">
-                        <label className="block text-sm font-medium mb-2 text-indigo-300">
-                          Wound Area (mm²)
-                          {imagePreview && <span className="text-xs text-indigo-400 ml-2">(Auto-estimated from image)</span>}
-                        </label>
-                        <input 
-                          type="number"
-                          value={manualAreaValue}
-                          onChange={(e) => setManualAreaValue(e.target.value)}
-                          className="w-full bg-indigo-800/30 border border-indigo-700 rounded-md p-2 text-white"
-                          placeholder="Enter area in mm²"
-                          required
-                          min="0.1"
-                          step="0.1"
-                        />
-                      </div>
-                      
-                      <div className="flex justify-end space-x-3">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setShowAreaInput(false);
-                            setManualAreaValue('');
-                            setImagePreview(null);
-                          }}
-                          className="px-4 py-2 bg-indigo-700 hover:bg-indigo-600 rounded-md text-sm"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="submit"
-                          className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-md text-sm"
-                        >
-                          Save Measurement
-                        </button>
-                      </div>
-                    </form>
-                  </div>
-                </div>
-              )}
+              {renderAreaInputDialog()}
 
               {/* Dashboard grid layout */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
@@ -1279,7 +2210,11 @@ const WoundTrackingApp = () => {
                       </div>
                       <div className="flex items-center gap-2">
                         <button 
-                          onClick={() => setShowAreaInput(true)}
+                          onClick={() => {
+                            // Reset canvas state before showing the dialog to start fresh
+                            resetCanvas();
+                            setShowAreaInput(true);
+                          }}
                           className="flex items-center bg-cyan-700 hover:bg-cyan-600 px-3 py-1 rounded-full text-xs"
                         >
                           <Camera size={14} className="mr-1" />
@@ -1316,7 +2251,7 @@ const WoundTrackingApp = () => {
                               </p>
                               {historicalData.length && (historicalData[0]?.area - currentData.area) > 0 && (
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 ml-1 text-emerald-400" viewBox="0 0 20 20" fill="currentColor">
-                                  <path fillRule="evenodd" d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z" clipRule="evenodd" />
+                                  <path fillRule="evenodd" d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 010 1.414z" clipRule="evenodd" />
                                 </svg>
                               )}
                             </div>
@@ -1829,7 +2764,7 @@ const WoundTrackingApp = () => {
                   {serialMessages.map((message, index) => (
                     <div 
                       key={index} 
-                      className={`mb-1 break-words pl-2 border-l-2 ${message.includes && message.includes('Error') ? 'border-red-600 text-red-400' : 'border-cyan-800'} hover:bg-cyan-900 hover:bg-opacity-10 transition`}
+                      className={`mb-1 break-words pl-2 border-l-2 ${message.includes('Error') ? 'border-red-600 text-red-400' : 'border-cyan-800'} hover:bg-cyan-900 hover:bg-opacity-10 transition`}
                     >
                       {message}
                     </div>
@@ -1947,7 +2882,7 @@ const CircularProgressIndicator = ({ percentage }: { percentage: number }) => {
             </svg>
           ) : (
             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-rose-400" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+              <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
             </svg>
           )}
         </div>
@@ -1956,5 +2891,5 @@ const CircularProgressIndicator = ({ percentage }: { percentage: number }) => {
   );
 };
 
+// Export the component so it can be used in main.tsx
 export default WoundTrackingApp;
-

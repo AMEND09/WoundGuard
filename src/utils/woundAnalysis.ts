@@ -16,6 +16,16 @@ export interface WoundAnalysisResult {
   pixelCount: number;
   totalPixels: number;
   detectionMethod: string;
+  healingIndicators?: {
+    inflammationScore: number;
+    exudateScore: number;
+    rednessRatio: number;
+    tissueTypes: {
+      granulation: number;
+      slough: number;
+      eschar: number;
+    }
+  };
 }
 
 export interface AnalysisOptions {
@@ -268,13 +278,23 @@ export async function analyzeWoundImage(
           options.userOutline
         );
         
+        // Analyze healing indicators
+        const healingIndicators = analyzeWoundHealingIndicators(
+          data, 
+          result.woundMask, 
+          canvas.width, 
+          canvas.height
+        );
+        
         resolve({
           estimatedArea: Math.max(1, Math.round(estimatedArea)),
           processedImageUrl,
           confidence: result.confidence,
           pixelCount: result.pixelCount,
           totalPixels: result.totalPixels,
-          detectionMethod
+          detectionMethod,
+          // Add healing indicators to the result
+          healingIndicators
         });
       } catch (error) {
         reject(error);
@@ -494,24 +514,25 @@ async function detectWoundWithML(
     // Create a temporary canvas from the image data
     const imageDataCanvas = createCanvasFromImageData(imageData);
     
+    let cropX = 0, cropY = 0, cropWidth = width, cropHeight = height;
+    let hasCrop = false;
+    
     // Use the boundingBox if provided to focus the ML processing on a specific area
-    if (boundingBox && boundingBox.width > 0 && boundingBox.height > 0) {
-      // Crop to the bounding box area if provided
-      tempCtx.drawImage(
-        imageDataCanvas,
-        boundingBox.x, boundingBox.y, boundingBox.width, boundingBox.height,
-        0, 0, modelInputSize, modelInputSize
-      );
-      
-      console.log(`Using bounding box: x=${boundingBox.x}, y=${boundingBox.y}, w=${boundingBox.width}, h=${boundingBox.height}`);
-    } else {
-      // Draw the full image if no bounding box
-      tempCtx.drawImage(
-        imageDataCanvas,
-        0, 0, width, height, 
-        0, 0, modelInputSize, modelInputSize
-      );
+    if (boundingBox && boundingBox.width > 10 && boundingBox.height > 10) {
+      // Set crop values from the bounding box
+      cropX = boundingBox.x;
+      cropY = boundingBox.y;
+      cropWidth = boundingBox.width;
+      cropHeight = boundingBox.height;
+      hasCrop = true;
     }
+    
+    // Draw the cropped image to the temporary canvas
+    tempCtx.drawImage(
+      imageDataCanvas,
+      cropX, cropY, cropWidth, cropHeight,
+      0, 0, modelInputSize, modelInputSize
+    );
     
     // Get the resized image data for processing
     const resizedData = tempCtx.getImageData(0, 0, modelInputSize, modelInputSize);
@@ -521,8 +542,13 @@ async function detectWoundWithML(
     if (userOutline && userOutline.points.length > 2) {
       // Scale the user outline to model input size
       const scaledPoints = userOutline.points.map(point => ({
-        x: (point.x / width) * modelInputSize,
-        y: (point.y / height) * modelInputSize
+        // If we cropped, we need to adjust the coordinates relative to the crop
+        x: hasCrop ? 
+          ((point.x - cropX) / cropWidth) * modelInputSize :
+          (point.x / width) * modelInputSize,
+        y: hasCrop ? 
+          ((point.y - cropY) / cropHeight) * modelInputSize :
+          (point.y / height) * modelInputSize
       }));
       
       roiMask = createRegionOfInterestMask(
@@ -588,53 +614,92 @@ async function detectWoundWithML(
     let confidenceSum = 0;
     
     // Resize the segmentation mask back to original image size
-    // This is a simple bilinear interpolation approach
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
-        // Map coordinates from original to model size
-        const srcX = (x / width) * modelInputSize;
-        const srcY = (y / height) * modelInputSize;
-        
-        // Get the four nearest source pixels
-        const srcX0 = Math.floor(srcX);
-        const srcY0 = Math.floor(srcY);
-        const srcX1 = Math.min(srcX0 + 1, modelInputSize - 1);
-        const srcY1 = Math.min(srcY0 + 1, modelInputSize - 1);
-        
-        // Calculate interpolation weights
-        const xWeight = srcX - srcX0;
-        const yWeight = srcY - srcY0;
-        
-        // Get values of the four nearest pixels from the model output
-        const val00 = outputData[srcY0 * modelInputSize + srcX0];
-        const val01 = outputData[srcY0 * modelInputSize + srcX1];
-        const val10 = outputData[srcY1 * modelInputSize + srcX0];
-        const val11 = outputData[srcY1 * modelInputSize + srcX1];
-        
-        // Perform bilinear interpolation
-        const topInterp = val00 * (1 - xWeight) + val01 * xWeight;
-        const bottomInterp = val10 * (1 - xWeight) + val11 * xWeight;
-        const finalVal = topInterp * (1 - yWeight) + bottomInterp * yWeight;
-        
-        // Threshold the value to get binary segmentation with confidence
-        const confidence = Math.max(0, Math.min(1, finalVal));
-        const isWound = confidence > 0.5;
-        
-        if (isWound) {
-          // Get the target index in the wound mask
-          const targetIdx = (y * width + x) * 4;
+        // Only process pixels inside the bounding box if one was provided
+        if (hasCrop && boundingBox) {    
+          const isInBoundingBox = x >= boundingBox.x && 
+                                x < (boundingBox.x + boundingBox.width) &&
+                                y >= boundingBox.y && 
+                                y < (boundingBox.y + boundingBox.height);
+                                
+          if (!isInBoundingBox) {
+            // Skip pixels outside the bounding box - important to ensure nothing outside is selected
+            continue;
+          }
           
-          // Mark as wound in the mask
-          woundMask[targetIdx] = 255;     // Red
-          woundMask[targetIdx + 1] = 0;   // Green
-          woundMask[targetIdx + 2] = 128; // Blue
+          // For pixels inside the bounding box, map to the model output coordinates
+          const modelX = Math.floor(((x - boundingBox.x) / boundingBox.width) * modelInputSize);
+          const modelY = Math.floor(((y - boundingBox.y) / boundingBox.height) * modelInputSize);
           
-          // Set alpha based on confidence (55-255)
-          woundMask[targetIdx + 3] = Math.round(confidence * 200 + 55);
+          // Check if the mapped coordinates are valid
+          if (modelX < 0 || modelX >= modelInputSize || modelY < 0 || modelY >= modelInputSize) {
+            continue;
+          }
           
-          // Count this pixel
-          pixelCount++;
-          confidenceSum += confidence;
+          // Get the confidence from the model output 
+          const confidence = outputData[modelY * modelInputSize + modelX];
+          const isWound = confidence > 0.5;
+          
+          if (isWound) {
+            // Mark this pixel in the mask
+            const targetIdx = (y * width + x) * 4;
+            
+            woundMask[targetIdx] = 255;     // Red
+            woundMask[targetIdx + 1] = 0;   // Green
+            woundMask[targetIdx + 2] = 128; // Blue
+            woundMask[targetIdx + 3] = Math.round(confidence * 200 + 55);
+            
+            pixelCount++;
+            confidenceSum += confidence;
+          }
+        } else {
+          // Regular full-image processing
+          // Map coordinates from original to model size
+          const srcX = (x / width) * modelInputSize;
+          const srcY = (y / height) * modelInputSize;
+          
+          // Get the four nearest source pixels
+          const srcX0 = Math.floor(srcX);
+          const srcY0 = Math.floor(srcY);
+          const srcX1 = Math.min(srcX0 + 1, modelInputSize - 1);
+          const srcY1 = Math.min(srcY0 + 1, modelInputSize - 1);
+          
+          // Calculate interpolation weights
+          const xWeight = srcX - srcX0;
+          const yWeight = srcY - srcY0;
+          
+          // Get values of the four nearest pixels from the model output
+          const val00 = outputData[srcY0 * modelInputSize + srcX0];
+          const val01 = outputData[srcY0 * modelInputSize + srcX1];
+          const val10 = outputData[srcY1 * modelInputSize + srcX0];
+          const val11 = outputData[srcY1 * modelInputSize + srcX1];
+          
+          // Perform bilinear interpolation
+          const topInterp = val00 * (1 - xWeight) + val01 * xWeight;
+          const bottomInterp = val10 * (1 - xWeight) + val11 * xWeight;
+          const finalVal = topInterp * (1 - yWeight) + bottomInterp * yWeight;
+          
+          // Threshold the value to get binary segmentation with confidence
+          const confidence = Math.max(0, Math.min(1, finalVal));
+          const isWound = confidence > 0.5;
+          
+          if (isWound) {
+            // Get the target index in the wound mask
+            const targetIdx = (y * width + x) * 4;
+            
+            // Mark as wound in the mask
+            woundMask[targetIdx] = 255;     // Red
+            woundMask[targetIdx + 1] = 0;   // Green
+            woundMask[targetIdx + 2] = 128; // Blue
+            
+            // Set alpha based on confidence (55-255)
+            woundMask[targetIdx + 3] = Math.round(confidence * 200 + 55);
+            
+            // Count this pixel
+            pixelCount++;
+            confidenceSum += confidence;
+          }
         }
       }
     }
@@ -1220,4 +1285,566 @@ export function calibratedSizeEstimation(
 ): number {
   const pixelToSizeRatio = referenceSize / referencePixels;
   return targetPixels * pixelToSizeRatio;
+}
+
+/**
+ * Calculate scale factor between two images based on visual features
+ * This helps when images are taken at different distances
+ * 
+ * @param referenceImageUrl URL or data URI of the reference image
+ * @param currentImageUrl URL or data URI of the current image
+ * @param options Optional configuration for the scaling process
+ * @returns Promise resolving to the calculated scale factor
+ */
+export async function calculateImageScaleFactor(
+  referenceImageUrl: string,
+  currentImageUrl: string,
+  options: {
+    manualScale?: number;
+    useFeatureMatching?: boolean;
+    referenceRegion?: {x: number, y: number, width: number, height: number};
+    currentRegion?: {x: number, y: number, width: number, height: number};
+  } = {}
+): Promise<number> {
+  // If manual scale is provided, return it directly
+  if (options.manualScale && options.manualScale > 0) {
+    return options.manualScale;
+  }
+
+  // Load both images
+  const [referenceImage, currentImage] = await Promise.all([
+    loadImage(referenceImageUrl),
+    loadImage(currentImageUrl)
+  ]);
+
+  // Default to simple size-based scaling if feature matching is not requested
+  if (!options.useFeatureMatching) {
+    // Calculate a simple ratio based on image dimensions
+    // This assumes both images have similar framing and the wound takes up a comparable 
+    // portion of the frame in both pictures
+    const referenceArea = referenceImage.width * referenceImage.height;
+    const currentArea = currentImage.width * currentImage.height;
+    
+    // Return the square root of the area ratio to get a linear scale factor
+    return Math.sqrt(currentArea / referenceArea);
+  }
+
+  // For more advanced feature matching, we need to extract visual features
+  // from both images and match them to determine the scale
+  // This implementation uses a simplified approach that works with regions of interest
+
+  // Create canvases for both images
+  const referenceCanvas = document.createElement('canvas');
+  const currentCanvas = document.createElement('canvas');
+  
+  // Setup reference canvas
+  referenceCanvas.width = referenceImage.width;
+  referenceCanvas.height = referenceImage.height;
+  const refCtx = referenceCanvas.getContext('2d');
+  if (!refCtx) throw new Error("Failed to create canvas context");
+  refCtx.drawImage(referenceImage, 0, 0);
+  
+  // Setup current image canvas
+  currentCanvas.width = currentImage.width;
+  currentCanvas.height = currentImage.height;
+  const curCtx = currentCanvas.getContext('2d');
+  if (!curCtx) throw new Error("Failed to create canvas context");
+  curCtx.drawImage(currentImage, 0, 0);
+
+  // Get image data, using regions if provided
+  const refRegion = options.referenceRegion || {
+    x: 0, y: 0, width: referenceImage.width, height: referenceImage.height
+  };
+  
+  const curRegion = options.currentRegion || {
+    x: 0, y: 0, width: currentImage.width, height: currentImage.height
+  };
+
+  const refImageData = refCtx.getImageData(
+    refRegion.x, refRegion.y, refRegion.width, refRegion.height
+  );
+  
+  const curImageData = curCtx.getImageData(
+    curRegion.x, curRegion.y, curRegion.width, curRegion.height
+  );
+
+  // Calculate feature descriptors for both images
+  // Here we use a simplified edge detection approach and histogram comparison
+  const refFeatures = extractImageFeatures(refImageData);
+  const curFeatures = extractImageFeatures(curImageData);
+  
+  // Compare features to estimate scale
+  const scaleEstimate = estimateScaleFromFeatures(refFeatures, curFeatures);
+  
+  // Apply a sanity check - scale factor should typically be between 0.5 and 2.0
+  // unless the images are taken from very different distances
+  const boundedScale = Math.max(0.25, Math.min(4.0, scaleEstimate));
+  
+  return boundedScale;
+}
+
+/**
+ * Load an image from URL or data URI
+ * @param url Image URL or data URI
+ * @returns Promise resolving to the loaded image
+ */
+function loadImage(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`Failed to load image: ${url}`));
+    img.src = url;
+  });
+}
+
+/**
+ * Extract simplified feature descriptors from image data for comparison
+ * @param imageData The image data to analyze
+ * @returns Object containing image features used for comparison
+ */
+function extractImageFeatures(imageData: ImageData) {
+  const { width, height, data } = imageData;
+  
+  // Calculate edge density using a simplified approach
+  let edges = 0;
+  const edgeThreshold = 30;
+  
+  // Calculate brightness histogram for distribution analysis
+  const histogram = new Array(256).fill(0);
+  
+  // Sample pixels with a stride to improve performance
+  const stride = Math.max(1, Math.floor(Math.sqrt(width * height) / 100));
+  
+  for (let y = stride; y < height - stride; y += stride) {
+    for (let x = stride; x < width - stride; x += stride) {
+      const idx = (y * width + x) * 4;
+      
+      // Calculate pixel brightness
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      const brightness = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+      
+      // Add to histogram
+      histogram[brightness]++;
+      
+      // Simple edge detection
+      const idxRight = (y * width + (x + stride)) * 4;
+      const idxDown = ((y + stride) * width + x) * 4;
+      
+      const brightRight = 0.299 * data[idxRight] + 0.587 * data[idxRight + 1] + 0.114 * data[idxRight + 2];
+      const brightDown = 0.299 * data[idxDown] + 0.587 * data[idxDown + 1] + 0.114 * data[idxDown + 2];
+      
+      if (Math.abs(brightness - brightRight) > edgeThreshold ||
+          Math.abs(brightness - brightDown) > edgeThreshold) {
+        edges++;
+      }
+    }
+  }
+  
+  // Calculate image complexity metrics
+  const edgeDensity = edges / ((width / stride) * (height / stride));
+  
+  // Calculate histogram features (25th, 50th, 75th percentiles)
+  const totalPixels = Math.floor((width / stride) * (height / stride));
+  let count = 0;
+  let p25 = 0, p50 = 0, p75 = 0;
+  
+  for (let i = 0; i < 256; i++) {
+    count += histogram[i];
+    if (!p25 && count >= totalPixels * 0.25) p25 = i;
+    if (!p50 && count >= totalPixels * 0.5) p50 = i;
+    if (!p75 && count >= totalPixels * 0.75) p75 = i;
+  }
+  
+  return {
+    width,
+    height,
+    edgeDensity,
+    histogram,
+    percentiles: { p25, p50, p75 }
+  };
+}
+
+/**
+ * Estimate the scale factor between two images based on their features
+ * @param reference Features from the reference image
+ * @param current Features from the current image
+ * @returns Estimated scale factor
+ */
+function estimateScaleFromFeatures(reference: any, current: any): number {
+  // Basic size-based estimate
+  const areaRatio = (current.width * current.height) / (reference.width * reference.height);
+  const sizeBasedScale = Math.sqrt(areaRatio);
+  
+  // Edge density comparison for feature-based estimate
+  // If edge density is higher, the image likely contains more detail (closer shot)
+  const edgeDensityRatio = reference.edgeDensity > 0 ? 
+    current.edgeDensity / reference.edgeDensity : 1;
+  
+  // Histogram distribution comparison
+  // Compare the spread of the histogram to gauge relative detail level
+  const refHistSpread = reference.percentiles.p75 - reference.percentiles.p25;
+  const curHistSpread = current.percentiles.p75 - current.percentiles.p25;
+  const histogramSpreadRatio = refHistSpread > 0 ? curHistSpread / refHistSpread : 1;
+  
+  // Combine multiple factors with weights
+  // Size is most reliable, so it gets the highest weight
+  const weightedScale = (sizeBasedScale * 0.6) + 
+                        (edgeDensityRatio * 0.25) + 
+                        (histogramSpreadRatio * 0.15);
+  
+  return weightedScale;
+}
+
+/**
+ * Apply scale factor to wound area measurement
+ * 
+ * @param area Original area measurement in mm²
+ * @param scaleFactor Scale factor relative to reference image
+ * @returns Adjusted area measurement in mm²
+ */
+export function applyScaleToArea(area: number, scaleFactor: number): number {
+  // Area scales with square of the linear scale factor
+  return area * (scaleFactor * scaleFactor);
+}
+
+/**
+ * Generates a thumbnail with scale indicators for two images
+ * 
+ * @param referenceImageUrl URL or data URI of the reference image
+ * @param currentImageUrl URL or data URI of the current image
+ * @param scaleFactor Scale factor between the two images
+ * @returns Promise resolving to data URIs for the processed images with scale indicators
+ */
+export async function generateScaleComparisonImages(
+  referenceImageUrl: string, 
+  currentImageUrl: string, 
+  scaleFactor: number
+): Promise<{referenceImage: string, currentImage: string}> {
+  try {
+    // Load both images
+    const [referenceImage, currentImage] = await Promise.all([
+      loadImage(referenceImageUrl),
+      loadImage(currentImageUrl)
+    ]);
+    
+    // Create canvases for both images
+    const refCanvas = document.createElement('canvas');
+    const curCanvas = document.createElement('canvas');
+    
+    // Size for thumbnail display (fixed for UI consistency)
+    const thumbnailSize = 150;
+    
+    // Determine scale to fit images in the fixed thumbnail size while maintaining aspect ratio
+    const refScale = Math.min(
+      thumbnailSize / referenceImage.width, 
+      thumbnailSize / referenceImage.height
+    );
+    
+    const curScale = Math.min(
+      thumbnailSize / currentImage.width,
+      thumbnailSize / currentImage.height
+    );
+    
+    // Set canvas dimensions to maintain aspect ratio
+    refCanvas.width = referenceImage.width * refScale;
+    refCanvas.height = referenceImage.height * refScale;
+    curCanvas.width = currentImage.width * curScale;
+    curCanvas.height = currentImage.height * curScale;
+    
+    // Get rendering contexts
+    const refCtx = refCanvas.getContext('2d');
+    const curCtx = curCanvas.getContext('2d');
+    
+    if (!refCtx || !curCtx) {
+      throw new Error("Failed to get canvas contexts");
+    }
+    
+    // Draw scaled images on canvases
+    refCtx.drawImage(
+      referenceImage, 
+      0, 0, 
+      refCanvas.width, 
+      refCanvas.height
+    );
+    
+    curCtx.drawImage(
+      currentImage, 
+      0, 0, 
+      curCanvas.width, 
+      curCanvas.height
+    );
+    
+    // Calculate the size of the scale indicator
+    // Base size is proportional to canvas width - we'll vary this by scale factor
+    const baseSize = Math.min(refCanvas.width, curCanvas.width) * 0.3;
+    const refIndicatorSize = baseSize;
+    const curIndicatorSize = baseSize * (1 / scaleFactor);
+    
+    // Draw scale indicators
+    // Reference image indicator (cyan)
+    refCtx.strokeStyle = 'rgba(6, 182, 212, 0.8)'; // cyan
+    refCtx.lineWidth = 2;
+    refCtx.strokeRect(
+      refCanvas.width - refIndicatorSize - 10, 
+      refCanvas.height - refIndicatorSize - 10,
+      refIndicatorSize,
+      refIndicatorSize
+    );
+    
+    // Current image indicator (yellow)
+    curCtx.strokeStyle = 'rgba(250, 204, 21, 0.8)'; // yellow
+    curCtx.lineWidth = 2;
+    curCtx.strokeRect(
+      curCanvas.width - curIndicatorSize - 10,
+      curCanvas.height - curIndicatorSize - 10,
+      curIndicatorSize,
+      curIndicatorSize
+    );
+    
+    // Add labels with scaling info
+    refCtx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    refCtx.fillRect(5, 5, 60, 16);
+    refCtx.fillStyle = '#FFFFFF';
+    refCtx.font = '10px Arial';
+    refCtx.fillText('Reference', 10, 15);
+    
+    curCtx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    curCtx.fillRect(5, 5, 60, 16);
+    curCtx.fillStyle = '#FFFFFF';
+    curCtx.font = '10px Arial';
+    curCtx.fillText(`Scale: ${scaleFactor.toFixed(2)}x`, 10, 15);
+    
+    // Return the data URIs
+    return {
+      referenceImage: refCanvas.toDataURL('image/jpeg'),
+      currentImage: curCanvas.toDataURL('image/jpeg')
+    };
+  } catch (error) {
+    console.error('Error generating scale comparison images:', error);
+    // Return the original images if processing fails
+    return {
+      referenceImage: referenceImageUrl,
+      currentImage: currentImageUrl
+    };
+  }
+}
+
+/**
+ * Analyzes wound healing indicators including inflammation and exudate (pus)
+ * 
+ * @param imageData Raw image data to analyze
+ * @param woundMask Mask identifying the wound region
+ * @param width Image width
+ * @param height Image height
+ * @returns Analysis results with healing indicators
+ */
+export function analyzeWoundHealingIndicators(
+  imageData: Uint8ClampedArray,
+  woundMask: Uint8ClampedArray,
+  width: number,
+  height: number
+): {
+  inflammationScore: number;
+  exudateScore: number;
+  rednessRatio: number;
+  tissueTypes: {
+    granulation: number;
+    slough: number;
+    eschar: number;
+  }
+} {
+  // Initialize counters and sums for analysis
+  let woundPixelCount = 0;
+  let inflammationSum = 0;
+  let exudateSum = 0;
+  
+  // Tissue type counters
+  let granulationPixels = 0;
+  let sloughPixels = 0;
+  let escharPixels = 0;
+  
+  // First pass: gather skin tone data from non-wound areas
+  const skinPixels: {r: number, g: number, b: number}[] = [];
+  
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      
+      // Skip transparent pixels
+      if (imageData[i + 3] < 128) continue;
+      
+      // If this pixel is not part of the wound (wound mask alpha is low)
+      if (woundMask[i + 3] < 50) {
+        // Sample skin pixels, but not from every pixel for performance
+        if ((x + y) % 7 === 0) { // Sample roughly every 7th pixel
+          const r = imageData[i];
+          const g = imageData[i + 1];
+          const b = imageData[i + 2];
+          
+          // Check if it's likely a skin pixel
+          if (isSkinPixel(r, g, b)) {
+            skinPixels.push({ r, g, b });
+          }
+        }
+      }
+    }
+  }
+  
+  // Calculate average skin tone from samples
+  const avgSkin = {
+    r: 0, g: 0, b: 0
+  };
+  
+  if (skinPixels.length > 0) {
+    // Calculate average skin tone
+    for (const pixel of skinPixels) {
+      avgSkin.r += pixel.r;
+      avgSkin.g += pixel.g;
+      avgSkin.b += pixel.b;
+    }
+    
+    avgSkin.r /= skinPixels.length;
+    avgSkin.g /= skinPixels.length;
+    avgSkin.b /= skinPixels.length;
+  } else {
+    // Fallback values if we couldn't detect skin
+    avgSkin.r = 210;
+    avgSkin.g = 180;
+    avgSkin.b = 160;
+  }
+  
+  // Now analyze wound pixels for inflammation and exudate
+  let totalRedValue = 0;
+  let totalGreenValue = 0;
+  let totalBlueValue = 0;
+  
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      
+      // Skip transparent pixels
+      if (imageData[i + 3] < 128) continue;
+      
+      // Check if this pixel is identified as part of the wound (wound mask alpha is high)
+      if (woundMask[i + 3] > 100) {
+        woundPixelCount++;
+        
+        const red = imageData[i];
+        const green = imageData[i + 1];
+        const blue = imageData[i + 2];
+        
+        // Add to color totals for later averages
+        totalRedValue += red;
+        totalGreenValue += green;
+        totalBlueValue += blue;
+        
+        // Calculate color metrics
+        const colorSum = red + green + blue;
+        const colorMax = Math.max(red, green, blue);
+        const colorMin = Math.min(red, green, blue);
+        const colorRange = colorMax - colorMin;
+        
+        // Calculate HSV values for tissue type assessment
+        let hue = 0;
+        let saturation = 0;
+        let value = colorMax / 255;
+        
+        if (colorMax > 0) {
+          saturation = colorRange / colorMax;
+          
+          if (colorRange > 0) {
+            if (colorMax === red) {
+              hue = ((green - blue) / colorRange) % 6;
+            } else if (colorMax === green) {
+              hue = ((blue - red) / colorRange) + 2;
+            } else {
+              hue = ((red - green) / colorRange) + 4;
+            }
+            
+            hue *= 60;
+            if (hue < 0) hue += 360;
+          }
+        }
+        
+        // Calculate inflammation score (increased redness compared to skin)
+        // Compare red channel enhancement relative to surrounding skin
+        const rednessRatio = red / (avgSkin.r || 1);
+        const greenRatio = green / (avgSkin.g || 1);
+        
+        // Inflammation is signified by increased redness compared to normal skin tone
+        const inflammationLevel = Math.max(0, Math.min(1, 
+          (rednessRatio - greenRatio) * 2 + // Red-green difference ratio 
+          (red > 1.3 * green && red > 1.3 * blue ? 0.5 : 0) + // Extra weight for very red pixels
+          (red > 200 && saturation > 0.4 ? 0.3 : 0) // Bright red areas
+        ));
+        
+        inflammationSum += inflammationLevel;
+        
+        // Exudate/pus detection - typically yellowish-white
+        // Pus tends to be high value (bright), low saturation (pale), with yellow-white hue
+        const isPale = saturation < 0.25 && value > 0.7;
+        const isYellowish = (hue >= 40 && hue <= 80) || (red > 200 && green > 180 && blue < 160);
+        const isWhitish = (red > 200 && green > 200 && blue > 180) && saturation < 0.15;
+        
+        const exudateLevel = Math.max(0, Math.min(1,
+          (isPale && (isYellowish || isWhitish) ? 0.7 : 0) +
+          (green > blue * 1.2 && red > blue * 1.2 && value > 0.6 ? 0.5 : 0) + // Yellow tones
+          (value > 0.85 && saturation < 0.2 ? 0.4 : 0) // Very bright, desaturated areas
+        ));
+        
+        exudateSum += exudateLevel;
+        
+        // Tissue type classification
+        if (red > 180 && red > green * 1.5 && red > blue * 1.5) {
+          // Bright red tissue - healthy granulation
+          granulationPixels++;
+        } 
+        else if ((isYellowish || (green > 170 && red > 170 && blue < 150)) && value > 0.5) {
+          // Yellow fibrinous tissue - slough
+          sloughPixels++;
+        }
+        else if (value < 0.25 || (red < 130 && green < 130 && blue < 130 && saturation < 0.3)) {
+          // Dark tissue - eschar/necrotic
+          escharPixels++;
+        }
+        else {
+          // Not clearly identified - assign to granulation by default
+          // This is a simplification - real tissue classification is much more complex
+          granulationPixels++;
+        }
+      }
+    }
+  }
+  
+  // Calculate average values and scores
+  const inflammationScore = woundPixelCount > 0 ? inflammationSum / woundPixelCount : 0;
+  const exudateScore = woundPixelCount > 0 ? exudateSum / woundPixelCount : 0;
+  
+  // Calculate redness ratio for the entire wound
+  const avgRed = woundPixelCount > 0 ? totalRedValue / woundPixelCount : 0;
+  const avgGreen = woundPixelCount > 0 ? totalGreenValue / woundPixelCount : 0;
+  const avgBlue = woundPixelCount > 0 ? totalBlueValue / woundPixelCount : 0;
+  
+  const woundRedness = avgGreen > 0 ? avgRed / avgGreen : 1;
+  const skinRedness = avgSkin.g > 0 ? avgSkin.r / avgSkin.g : 1;
+  
+  // Normalized redness ratio comparing wound to surrounding skin
+  const rednessRatio = skinRedness > 0 ? woundRedness / skinRedness : 1;
+  
+  // Calculate tissue type percentages
+  const totalTissuePixels = granulationPixels + sloughPixels + escharPixels;
+  const tissueTypes = {
+    granulation: totalTissuePixels > 0 ? granulationPixels / totalTissuePixels : 0,
+    slough: totalTissuePixels > 0 ? sloughPixels / totalTissuePixels : 0,
+    eschar: totalTissuePixels > 0 ? escharPixels / totalTissuePixels : 0
+  };
+  
+  return {
+    inflammationScore,
+    exudateScore,
+    rednessRatio,
+    tissueTypes
+  };
 }

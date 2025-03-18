@@ -3,8 +3,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, BarChart, Bar } from 'recharts';
 import { Gauge, AlertCircle, Wifi, WifiOff, Droplet, ThermometerSun, Microscope, Activity, Camera, PencilRuler, FileDown, FileUp, ClipboardList, ClipboardEdit, Download } from 'lucide-react';
-import { analyzeWoundImage as analyzeWoundImageUtil, preloadWoundSegmentationModel } from '@/utils/woundAnalysis';
+import { analyzeWoundImage as analyzeWoundImageUtil, preloadWoundSegmentationModel, calculateImageScaleFactor, applyScaleToArea } from '@/utils/woundAnalysis';
 import DetectionSettings from '@/components/MLToggle';
+import { HealingIndicators } from '@/components/HealingIndicators';
 
 // Define interfaces for the app
 interface HistoricalDataPoint {
@@ -16,6 +17,17 @@ interface HistoricalDataPoint {
   lastUpdate?: string | null;
   imageUrl?: string | null;
   notes?: string;
+  scaleFactor?: number;
+  healingIndicators?: {
+    inflammationScore: number;
+    exudateScore: number;
+    rednessRatio: number;
+    tissueTypes: {
+      granulation: number;
+      slough: number;
+      eschar: number;
+    }
+  };
 }
 
 interface SensorData {
@@ -64,6 +76,16 @@ interface BoundingBoxData {
   y: number;
   width: number;
   height: number;
+}
+
+// Add this interface for the scaling state
+interface ScalingState {
+  isScaling: boolean;
+  referenceImage: string | null;
+  referenceArea: number | null;
+  referenceDay: number | null;
+  scaleFactor: number;
+  autoCalculated: boolean;
 }
 
 const WoundTrackingApp = () => {
@@ -126,6 +148,16 @@ const WoundTrackingApp = () => {
     endX: 0,
     endY: 0,
     isDrawing: false
+  });
+
+  // Inside the WoundTrackingApp component, add this new state variable
+  const [scalingState, setScalingState] = useState<ScalingState>({
+    isScaling: false,
+    referenceImage: null,
+    referenceArea: null,
+    referenceDay: null,
+    scaleFactor: 1.0,
+    autoCalculated: false
   });
 
   // Preload ML model in the background when app starts
@@ -892,23 +924,39 @@ const WoundTrackingApp = () => {
       setCurrentData(newData);
       setShowAreaInput(false);
       
-      // Add to historical record
+      // Add to historical record with scale factor and healing indicators
       setHistoricalData(prev => [
         ...prev, 
         {
           day: prev.length > 0 ? prev[prev.length - 1].day + 1 : 1,
           ...newData,
-          imageUrl: currentImageForHistory
+          imageUrl: currentImageForHistory,
+          scaleFactor: scalingState.scaleFactor !== 1.0 ? scalingState.scaleFactor : undefined,
+          healingIndicators: currentHealingData // Add healing indicators to historical record
         }
       ]);
       
-      // Log the manual measurement
+      // Log the manual measurement with scale info if applicable
+      const scaleInfo = scalingState.scaleFactor !== 1.0 
+        ? ` (scaled by ${scalingState.scaleFactor.toFixed(2)}x relative to Day ${scalingState.referenceDay})` 
+        : '';
+      
       setSerialMessages(prev => [...prev, 
-        `[MANUAL] [${newData.lastUpdate}] Area measurement recorded: ${areaValue.toFixed(1)}mm²`
+        `[MANUAL] [${newData.lastUpdate}] Area measurement recorded: ${areaValue.toFixed(1)}mm²${scaleInfo}`
       ]);
       
       // Reset the canvas and related state completely
       resetCanvas();
+      
+      // Reset scaling state
+      setScalingState({
+        isScaling: false,
+        referenceImage: null,
+        referenceArea: null,
+        referenceDay: null,
+        scaleFactor: 1.0,
+        autoCalculated: false
+      });
     }
   };
 
@@ -988,11 +1036,11 @@ const WoundTrackingApp = () => {
       }
       
       weeks[weekKey].area.push(point.area);
-      weeks[weekKey].temperature.push(typeof point.temperature === 'string' ? 
-        parseFloat(point.temperature) : point.temperature);
+      weeks[weekKey].temperature.push(typeof point.temperature === 'string' 
+        ? parseFloat(point.temperature) : point.temperature);
       weeks[weekKey].humidity.push(point.humidity);
-      weeks[weekKey].ph.push(typeof point.ph === 'string' ? 
-        parseFloat(point.ph) : point.ph);
+      weeks[weekKey].ph.push(typeof point.ph === 'string' 
+        ? parseFloat(point.ph) : point.ph);
     });
     
     // Calculate average values and healing rate for each week
@@ -1054,6 +1102,9 @@ const WoundTrackingApp = () => {
   const handleDrawStart = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
     if (!drawingEnabled || !canvasRef.current) return;
     
+    // Prevent default browser behavior including scrolling on touch devices
+    e.preventDefault();
+    
     if (drawingMode === 'boundingBox') {
       handleBoundingBoxStart(e);
       return;
@@ -1108,6 +1159,9 @@ const WoundTrackingApp = () => {
   const handleDrawMove = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
     if (!canvasRef.current) return;
     
+    // Always prevent default to stop scrolling
+    e.preventDefault();
+    
     if (drawingMode === 'boundingBox') {
       handleBoundingBoxMove(e);
       return;
@@ -1115,8 +1169,6 @@ const WoundTrackingApp = () => {
     
     // Original outline drawing code
     if (!drawingState.isDrawing || !drawingState.canvasRect) return;
-    
-    e.preventDefault(); // Prevent scrolling on touch devices
     
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
@@ -1215,6 +1267,9 @@ const WoundTrackingApp = () => {
   const handleBoundingBoxStart = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
     if (!drawingEnabled || !canvasRef.current || drawingMode !== 'boundingBox') return;
     
+    // Prevent default to stop scrolling
+    e.preventDefault();
+    
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
     
@@ -1257,7 +1312,8 @@ const WoundTrackingApp = () => {
   const handleBoundingBoxMove = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
     if (!boundingBoxState.isDrawing || !canvasRef.current || drawingMode !== 'boundingBox') return;
     
-    e.preventDefault(); // Prevent scrolling on touch devices
+    // Prevent default to stop scrolling
+    e.preventDefault();
     
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
@@ -1352,7 +1408,23 @@ const WoundTrackingApp = () => {
         // Keep the canvas dimensions the same, but redraw the image
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       };
-      img.src = imagePreview;
+      
+      // Use the original image URL, not the processed one with overlays
+      // Parse the URL to get just the base image without any overlays
+      let originalImageUrl = imagePreview;
+      // If it's a data URL with processing overlays, try to extract the original
+      if (originalImageUrl.includes("data:image") && manualAreaValue) {
+        // We'll create a new image from scratch since we can't easily get the original back
+        const originalImg = new Image();
+        originalImg.onload = () => {
+          canvas.width = originalImg.width;
+          canvas.height = originalImg.height;
+          ctx.drawImage(originalImg, 0, 0);
+        };
+        originalImg.src = imagePreview;
+      } else {
+        img.src = imagePreview;
+      }
     }
     
     // Reset drawing states
@@ -1369,6 +1441,10 @@ const WoundTrackingApp = () => {
       endY: 0,
       isDrawing: false
     });
+    
+    // Clear the previous wound analysis result
+    // But don't clear the manualAreaValue to allow keeping the measurement
+    // if the user wants to maintain it
   };
 
   // Function to normalize the bounding box (handle negative width/height)
@@ -1415,20 +1491,6 @@ const WoundTrackingApp = () => {
       return;
     }
     
-    // Save original user drawing to reapply later
-    let userDrawing: ImageData | null = null;
-    if (!isPreview && drawingMode === 'outline' && drawingState.points.length > 2) {
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = canvasRef.current.width;
-      tempCanvas.height = canvasRef.current.height;
-      const tempCtx = tempCanvas.getContext('2d');
-      
-      if (tempCtx) {
-        tempCtx.drawImage(canvasRef.current, 0, 0);
-        userDrawing = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
-      }
-    }
-    
     // Prepare user outline or bounding box data
     let userOutline: UserOutlineData | undefined = undefined;
     let boundingBox: BoundingBoxData | undefined = undefined;
@@ -1465,24 +1527,33 @@ const WoundTrackingApp = () => {
       // Set the processed image with detection visualization
       // But don't update imagePreview directly since we need to draw user highlights on it
       
-      // Reload the image on the canvas with the analyzed version
-      const img = new Image();
-      img.onload = () => {
-        if (canvasRef.current) {
-          const canvas = canvasRef.current;
-          const ctx = canvas.getContext('2d');
-          
-          if (ctx) {
-            // Draw the processed image
+      // Reload the image on the canvas with the analyzed version overlaid on the original
+      if (canvasRef.current) {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+        
+        if (ctx) {
+          // First, load the original image
+          const originalImg = new Image();
+          originalImg.onload = () => {
+            // Clear canvas and draw the original image with reduced opacity
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            ctx.globalAlpha = 0.5; // Set original image to be partially transparent
+            ctx.drawImage(originalImg, 0, 0, canvas.width, canvas.height);
             
-            // If we have user drawings, reapply them
-            if (userDrawing && !isPreview && drawingMode === 'outline') {
-              // Redraw the user's highlights with the appropriate style
-              ctx.globalAlpha = 0.4; // Semi-transparent
+            // Now draw the processed image on top with higher opacity
+            const processedImg = new Image();
+            processedImg.onload = () => {
+              ctx.globalAlpha = 0.8; // More visible for the processed part
+              ctx.drawImage(processedImg, 0, 0, canvas.width, canvas.height);
               
-              if (drawingState.points.length > 2) {
+              // Reset alpha for subsequent operations
+              ctx.globalAlpha = 1.0;
+              
+              // If we have user drawings, reapply them
+              if (drawingMode === 'outline' && drawingState.points.length > 2) {
+                // Redraw the user's highlights with the appropriate style
+                ctx.globalAlpha = 0.4; // Semi-transparent
                 ctx.lineWidth = 12; // Thicker line for highlighting
                 ctx.strokeStyle = 'rgba(0, 255, 255, 0.6)'; // Semi-transparent cyan
                 ctx.lineCap = 'round';
@@ -1496,36 +1567,51 @@ const WoundTrackingApp = () => {
                 }
                 
                 ctx.stroke();
+                ctx.globalAlpha = 1.0; // Reset alpha
+              } else if (drawingMode === 'boundingBox' && boundingBox) {
+                // Redraw the user's bounding box
+                const { x, y, width, height } = boundingBox;
+                ctx.strokeStyle = 'rgba(0, 255, 255, 0.8)';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([5, 3]);
+                ctx.strokeRect(x, y, width, height);
+                ctx.setLineDash([]);
+                
+                // Draw handles at corners
+                ctx.fillStyle = 'rgba(0, 255, 255, 0.8)';
+                const handleSize = 6;
+                ctx.fillRect(x - handleSize/2, y - handleSize/2, handleSize, handleSize);
+                ctx.fillRect(x + width - handleSize/2, y - handleSize/2, handleSize, handleSize);
+                ctx.fillRect(x - handleSize/2, y + height - handleSize/2, handleSize, handleSize);
+                ctx.fillRect(x + width - handleSize/2, y + height - handleSize/2, handleSize, handleSize);
               }
               
-              ctx.globalAlpha = 1.0; // Reset alpha
-            } else if (!isPreview && drawingMode === 'boundingBox' && boundingBox) {
-              // Redraw the user's bounding box
-              const { x, y, width, height } = boundingBox;
-              ctx.strokeStyle = 'rgba(0, 255, 255, 0.8)';
-              ctx.lineWidth = 2;
-              ctx.setLineDash([5, 3]);
-              ctx.strokeRect(x, y, width, height);
-              ctx.setLineDash([]);
-              
-              // Draw handles at corners
-              ctx.fillStyle = 'rgba(0, 255, 255, 0.8)';
-              const handleSize = 6;
-              ctx.fillRect(x - handleSize/2, y - handleSize/2, handleSize, handleSize);
-              ctx.fillRect(x + width - handleSize/2, y - handleSize/2, handleSize, handleSize);
-              ctx.fillRect(x - handleSize/2, y + height - handleSize/2, handleSize, handleSize);
-              ctx.fillRect(x + width - handleSize/2, y + height - handleSize/2, handleSize, handleSize);
-            }
-            
-            // Save the final canvas as the new image preview
-            setImagePreview(canvas.toDataURL('image/png'));
-          }
+              // Save the final canvas as the new image preview
+              setImagePreview(canvas.toDataURL('image/png'));
+            };
+            processedImg.src = result.processedImageUrl;
+          };
+          originalImg.src = imagePreview;
         }
-      };
-      img.src = result.processedImageUrl;
+      }
       
       // Set the estimated area
       setManualAreaValue(result.estimatedArea.toString());
+      
+      // Store the healing indicators (new)
+      const healingData = result.healingIndicators || {
+        inflammationScore: 0,
+        exudateScore: 0,
+        rednessRatio: 1,
+        tissueTypes: {
+          granulation: 0.7,
+          slough: 0.2, 
+          eschar: 0.1
+        }
+      };
+      
+      // Create a reference to the current healing indicators for adding to historical data
+      const currentHealingIndicators = healingData;
       
       // Log the results with sensitivity info if not in preview mode
       if (!isPreview) {
@@ -1539,9 +1625,13 @@ const WoundTrackingApp = () => {
         setSerialMessages(prev => [...prev, 
           `[IMAGE] Wound image analyzed. Estimated area: ~${result.estimatedArea}mm² (adjust if needed)`,
           `[IMAGE] Detection confidence: ${Math.round(result.confidence * 100)}%`,
-          `[IMAGE] Detection method: ${detectionMethod} (${result.detectionMethod})`
+          `[IMAGE] Detection method: ${detectionMethod} (${result.detectionMethod})`,
+          `[HEALING] Inflammation level: ${Math.round(healingData.inflammationScore * 100)}%, Redness ratio: ${healingData.rednessRatio.toFixed(2)}x, Exudate: ${Math.round(healingData.exudateScore * 100)}%`
         ]);
       }
+      
+      // Add the current healing indicators to component state
+      setCurrentHealingData(currentHealingIndicators);
     })
     .catch(error => {
       // Fallback to the built-in estimation method if advanced analysis fails
@@ -1553,6 +1643,202 @@ const WoundTrackingApp = () => {
         ]);
       }
     });
+  };
+
+  // Add this function to handle selecting a reference image
+  const selectReferenceImage = (dataPoint: HistoricalDataPoint) => {
+    if (!dataPoint.imageUrl) {
+      setSerialMessages(prev => [...prev, 
+        `[ERROR] Selected reference has no image. Please select another day.`
+      ]);
+      return;
+    }
+    
+    setScalingState(prev => ({
+      ...prev,
+      referenceImage: dataPoint.imageUrl || null,
+      referenceArea: dataPoint.area,
+      referenceDay: dataPoint.day,
+      autoCalculated: false
+    }));
+    
+    setSerialMessages(prev => [...prev, 
+      `[SCALE] Set Day ${dataPoint.day} as reference (${dataPoint.area.toFixed(1)}mm²)`
+    ]);
+  };
+
+  // Add this function to calculate scale between current image and reference
+  const calculateScale = async () => {
+    if (!imagePreview || !scalingState.referenceImage) {
+      setSerialMessages(prev => [...prev, 
+        `[ERROR] Need both current and reference images to calculate scale.`
+      ]);
+      return;
+    }
+    
+    try {
+      setSerialMessages(prev => [...prev, 
+        `[SCALE] Calculating scale factor between images...`
+      ]);
+      
+      // Calculate scale factor between reference and current image
+      const scaleFactor = await calculateImageScaleFactor(
+        scalingState.referenceImage,
+        imagePreview,
+        { useFeatureMatching: true }
+      );
+      
+      // Update the scaling state with the calculated factor
+      setScalingState(prev => ({
+        ...prev,
+        scaleFactor,
+        autoCalculated: true
+      }));
+      
+      // Update the area value with the scaled version
+      const originalArea = parseFloat(manualAreaValue) || 0;
+      const scaledArea = applyScaleToArea(originalArea, 1/scaleFactor);
+      setManualAreaValue(scaledArea.toFixed(1));
+      
+      setSerialMessages(prev => [...prev, 
+        `[SCALE] Scale factor: ${scaleFactor.toFixed(2)}x`,
+        `[SCALE] Adjusted area: ${scaledArea.toFixed(1)}mm² (original estimate: ${originalArea.toFixed(1)}mm²)`
+      ]);
+    } catch (error) {
+      console.error('Error calculating scale:', error);
+      setSerialMessages(prev => [...prev, 
+        `[ERROR] Failed to calculate scale: ${error instanceof Error ? error.message : String(error)}`
+      ]);
+    }
+  };
+
+  // Add this function to manually set the scale factor
+  const setManualScaleFactor = (factor: number) => {
+    const originalArea = parseFloat(manualAreaValue) || 0;
+    const scaledArea = applyScaleToArea(originalArea, 1/factor);
+    
+    setScalingState(prev => ({
+      ...prev,
+      scaleFactor: factor,
+      autoCalculated: false
+    }));
+    
+    setManualAreaValue(scaledArea.toFixed(1));
+    
+    setSerialMessages(prev => [...prev, 
+      `[SCALE] Manual scale factor set to ${factor.toFixed(2)}x`,
+      `[SCALE] Adjusted area: ${scaledArea.toFixed(1)}mm² (original: ${originalArea.toFixed(1)}mm²)`
+    ]);
+  };
+
+  // Add a function to toggle scaling mode
+  const toggleScalingMode = () => {
+    setScalingState(prev => ({
+      ...prev,
+      isScaling: !prev.isScaling,
+      // Reset if we're turning off scaling
+      ...(prev.isScaling ? {
+        referenceImage: null,
+        referenceArea: null,
+        referenceDay: null,
+        scaleFactor: 1.0,
+        autoCalculated: false
+      } : {})
+    }));
+    
+    if (!scalingState.isScaling) {
+      setSerialMessages(prev => [...prev, 
+        `[SCALE] Scaling mode activated. Select a reference image to compare with.`
+      ]);
+    } else {
+      setSerialMessages(prev => [...prev, 
+        `[SCALE] Scaling mode deactivated.`
+      ]);
+    }
+  };
+
+  // Add this function to visualize the scaling between images
+  const renderScaleComparison = () => {
+    if (!scalingState.referenceImage || !imagePreview) return null;
+    
+    const scaleRatio = scalingState.scaleFactor;
+    const inverseScale = 1 / scaleRatio;
+    
+    // Calculate the size of the comparison indicator
+    // Base size is 40px - we'll scale this by the scaling factor
+    const referenceSquareSize = 40;
+    const currentSquareSize = Math.round(referenceSquareSize * inverseScale);
+    
+    return (
+      <div className="mt-2 bg-indigo-800/20 rounded-md p-3">
+        <p className="text-xs text-indigo-300 mb-2">Scale Visualization</p>
+        <div className="flex flex-wrap gap-2 justify-center">
+          <div className="relative flex flex-col items-center">
+            <div className="h-24 w-24 relative bg-indigo-900/30 rounded flex items-center justify-center overflow-hidden">
+              <img 
+                src={scalingState.referenceImage} 
+                alt="Reference" 
+                className="max-h-full max-w-full object-contain opacity-70"
+              />
+              <div 
+                className="absolute border-2 border-cyan-400"
+                style={{ 
+                  width: `${referenceSquareSize}px`, 
+                  height: `${referenceSquareSize}px`
+                }}
+              />
+            </div>
+            <p className="text-[10px] text-indigo-300 mt-1">Reference Image</p>
+            <p className="text-[10px] text-cyan-300">
+              {scalingState.referenceArea?.toFixed(1)} mm²
+            </p>
+          </div>
+          
+          <div className="flex items-center justify-center">
+            <div className="flex flex-col items-center px-2">
+              <svg className="text-indigo-400 w-5 h-5 mb-1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="17 1 21 5 17 9"></polyline>
+                <path d="M13 5H1"></path>
+                <polyline points="7 23 3 19 7 15"></polyline>
+                <path d="M11 19H23"></path>
+              </svg>
+              <p className="text-[10px] text-indigo-300">Scale: {scaleRatio.toFixed(2)}x</p>
+            </div>
+          </div>
+          
+          <div className="relative flex flex-col items-center">
+            <div className="h-24 w-24 relative bg-indigo-900/30 rounded flex items-center justify-center overflow-hidden">
+              <img 
+                src={imagePreview} 
+                alt="Current" 
+                className="max-h-full max-w-full object-contain opacity-70"
+              />
+              <div 
+                className="absolute border-2 border-yellow-400"
+                style={{ 
+                  width: `${currentSquareSize}px`, 
+                  height: `${currentSquareSize}px`
+                }}
+              />
+            </div>
+            <p className="text-[10px] text-indigo-300 mt-1">Current Image</p>
+            <p className="text-[10px] text-yellow-300">
+              {parseFloat(manualAreaValue).toFixed(1)} mm² (adjusted)
+            </p>
+          </div>
+        </div>
+        <div className="mt-3 text-center">
+          <p className="text-[10px] text-indigo-300">
+            {scalingState.scaleFactor < 1 
+              ? `Current image appears to be taken ${(1/scalingState.scaleFactor).toFixed(1)}x closer than reference`
+              : scalingState.scaleFactor > 1
+                ? `Current image appears to be taken ${scalingState.scaleFactor.toFixed(1)}x further than reference` 
+                : `Images appear to be taken from the same distance`
+            }
+          </p>
+        </div>
+      </div>
+    );
   };
 
   // Modified area input dialog to include drawing capabilities and sensitivity settings
@@ -1648,7 +1934,7 @@ const WoundTrackingApp = () => {
                     <div className="relative w-full overflow-hidden rounded border border-indigo-700">
                       <canvas
                         ref={canvasRef}
-                        className={`w-full h-auto object-contain ${drawingEnabled ? 'cursor-crosshair' : 'cursor-default'}`}
+                        className={`w-full h-auto object-contain ${drawingEnabled ? 'cursor-crosshair touch-none' : 'cursor-default'}`}
                         onMouseDown={handleDrawStart}
                         onMouseMove={handleDrawMove}
                         onMouseUp={handleDrawEnd}
@@ -1656,6 +1942,7 @@ const WoundTrackingApp = () => {
                         onTouchStart={handleDrawStart}
                         onTouchMove={handleDrawMove}
                         onTouchEnd={handleDrawEnd}
+                        onTouchCancel={handleDrawEnd}
                       />
                       <div className="absolute top-0 right-0 bg-indigo-900/80 text-xs px-2 py-1 rounded m-1">
                         {manualAreaValue ? `Est. ${manualAreaValue} mm²` : "Upload or select image"}
@@ -1732,6 +2019,112 @@ const WoundTrackingApp = () => {
                   </p>
                 )}
               </div>
+
+              {/* New scaling toggle and controls */}
+              {imagePreview && historicalData.filter(data => data.imageUrl).length > 0 && (
+                <div className="mb-4 border-t border-indigo-800 pt-4 mt-4">
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="block text-sm font-medium text-indigo-300">
+                      Image Scale Adjustment
+                    </label>
+                    <button
+                      type="button"
+                      onClick={toggleScalingMode}
+                      className={`text-xs px-2 py-1 rounded ${
+                        scalingState.isScaling 
+                          ? 'bg-emerald-600 text-white' 
+                          : 'bg-indigo-800 text-indigo-300'
+                      }`}
+                    >
+                      {scalingState.isScaling ? 'Scaling Active' : 'Enable Scaling'}
+                    </button>
+                  </div>
+                  
+                  {scalingState.isScaling && (
+                    <div className="bg-indigo-800/30 border border-indigo-700 rounded-md p-3 mb-3">
+                      <p className="text-xs text-indigo-300 mb-2">
+                        Select a reference image to ensure consistent measurements across photos taken at different distances.
+                      </p>
+                      
+                      {/* Reference image selection */}
+                      <div className="mb-3">
+                        <label className="block text-xs text-indigo-300 mb-1">
+                          Reference Image:
+                        </label>
+                        <div className="flex gap-2 overflow-x-auto py-1">
+                          {historicalData
+                            .filter(data => data.imageUrl)
+                            .slice(-4)
+                            .map((data, index) => (
+                              <div 
+                                key={index} 
+                                className={`flex-none w-16 h-16 relative cursor-pointer ${
+                                  scalingState.referenceDay === data.day ? 'ring-2 ring-cyan-400' : ''
+                                }`}
+                                onClick={() => selectReferenceImage(data)}
+                              >
+                                <img 
+                                  src={data.imageUrl || ''} 
+                                  alt={`Day ${data.day}`}
+                                  className="w-16 h-16 object-cover rounded-md border border-indigo-700"
+                                />
+                                <div className="absolute bottom-0 left-0 right-0 bg-indigo-900/80 backdrop-blur-sm text-[9px] text-center text-white py-0.5">
+                                  Day {data.day} - {data.area.toFixed(1)}mm²
+                                </div>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                      
+                      {scalingState.referenceImage && (
+                        <>
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="text-xs text-indigo-300">
+                              Reference: Day {scalingState.referenceDay} ({scalingState.referenceArea?.toFixed(1)} mm²)
+                            </span>
+                            <button
+                              type="button"
+                              onClick={calculateScale}
+                              className="text-xs px-2 py-1 bg-cyan-600 hover:bg-cyan-500 rounded"
+                            >
+                              Auto-Calculate
+                            </button>
+                          </div>
+                          
+                          <div>
+                            <label className="block text-xs text-indigo-300 mb-1">
+                              Scale Factor: {scalingState.scaleFactor.toFixed(2)}x
+                            </label>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="range"
+                                min="0.5"
+                                max="2"
+                                step="0.05"
+                                value={scalingState.scaleFactor}
+                                onChange={(e) => setManualScaleFactor(parseFloat(e.target.value))}
+                                className="flex-grow h-2 bg-indigo-700 rounded-lg appearance-none cursor-pointer"
+                              />
+                              <span className={`text-xs px-1.5 py-0.5 rounded ${
+                                scalingState.autoCalculated ? 'bg-emerald-900 text-emerald-300' : 'bg-indigo-700 text-indigo-300'
+                              }`}>
+                                {scalingState.autoCalculated ? 'Auto' : 'Manual'}
+                              </span>
+                            </div>
+                            <div className="flex justify-between mt-1">
+                              <span className="text-[9px] text-indigo-400">Closer (0.5x)</span>
+                              <span className="text-[9px] text-indigo-400">Further (2x)</span>
+                            </div>
+                            
+                            {/* Add the visual comparison here */}
+                            {renderScaleComparison()}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             
             <div className="p-4 border-t border-indigo-800 flex justify-end space-x-3 flex-shrink-0">
@@ -1742,6 +2135,15 @@ const WoundTrackingApp = () => {
                   // Just disable drawing mode but keep the image preview in case user wants to
                   // continue working with the current image
                   setDrawingEnabled(false);
+                  // Reset scaling state
+                  setScalingState({
+                    isScaling: false,
+                    referenceImage: null,
+                    referenceArea: null,
+                    referenceDay: null,
+                    scaleFactor: 1.0,
+                    autoCalculated: false
+                  });
                 }}
                 className="px-4 py-2 bg-indigo-700 hover:bg-indigo-600 rounded-md text-sm"
               >
@@ -1766,6 +2168,18 @@ const WoundTrackingApp = () => {
       updatePreview();
     }
   }, [drawingState.points.length]);
+
+  // Add state for current healing data
+  const [currentHealingData, setCurrentHealingData] = useState({
+    inflammationScore: 0.2,
+    exudateScore: 0.1,
+    rednessRatio: 1.1,
+    tissueTypes: {
+      granulation: 0.7,
+      slough: 0.2, 
+      eschar: 0.1
+    }
+  });
 
   return (
     <div className="flex flex-col min-h-screen bg-indigo-950 text-white">
@@ -2234,6 +2648,16 @@ const WoundTrackingApp = () => {
                         </div>
                       </div>
                       <div className="w-full md:w-2/3 lg:w-3/4 flex flex-col">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+                          {/* Add the healing indicators component */}
+                          <HealingIndicators 
+                            inflammationScore={currentHealingData.inflammationScore}
+                            exudateScore={currentHealingData.exudateScore}
+                            rednessRatio={currentHealingData.rednessRatio}
+                            tissueTypes={currentHealingData.tissueTypes}
+                          />
+                        </div>
+                        
                         <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
                           <div className="bg-indigo-800/30 backdrop-blur-sm p-3 rounded-lg">
                             <p className="text-xs text-indigo-300">Initial Size</p>
@@ -2439,8 +2863,15 @@ const WoundTrackingApp = () => {
                             <div className="absolute bottom-9 left-0 right-0 bg-indigo-900/80 backdrop-blur-sm text-[10px] text-center text-white py-0.5">
                               Day {data.day}
                             </div>
-                            <div className="absolute bottom-0 left-0 right-0 bg-indigo-900/80 backdrop-blur-sm text-[10px] text-center text-cyan-300 py-0.5">
+                            <div className={`absolute bottom-0 left-0 right-0 ${
+                              data.scaleFactor ? 'bg-cyan-900/80' : 'bg-indigo-900/80'
+                            } backdrop-blur-sm text-[10px] text-center ${
+                              data.scaleFactor ? 'text-cyan-300' : 'text-indigo-300'
+                            } py-0.5`}>
                               {data.area.toFixed(1)} mm²
+                              {data.scaleFactor && (
+                                <span className="text-[8px] ml-0.5">↔</span>
+                              )}
                             </div>
                           </div>
                         ))}
